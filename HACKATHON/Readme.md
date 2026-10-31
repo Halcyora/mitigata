@@ -15,11 +15,62 @@ engine, dashboard, and target applications:
 docker compose up --build
 ```
 
-Compose builds and starts the Flask reference app and OWASP Juice Shop. Neither
-target publishes a port to the host. Scanner images are configured as on-demand
-Compose services: Semgrep can read target source but cannot reach the target
-network; ZAP can reach only the isolated target network. Do not expose these
-intentionally vulnerable target containers to untrusted networks.
+Compose builds and starts the Flask reference app and OWASP Juice Shop. The
+targets bind only to dynamically assigned host loopback ports. Scanner images are
+configured as on-demand Compose services: Semgrep can read target source but
+cannot reach the target network; ZAP can reach only the isolated target
+network. Do not expose these intentionally vulnerable target containers to
+untrusted networks.
+
+### Run the API and GraphCodeBERT in the host Python environment
+
+Use this path when the engine Docker image cannot be rebuilt (for example, when
+the Docker build environment cannot validate the package index certificate).
+Docker still provides the isolated Flask and Juice Shop targets and the
+containerized scanners; FastAPI and GraphCodeBERT run in your local Python
+environment. The local launcher stops the Compose engine/frontend services,
+starts only the two targets, and sets their loopback URLs for API verification.
+It does not build the engine image.
+
+From this directory in PowerShell, prepare the Python environment once:
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+Fetch the pinned target sources and Flask wheelhouse if they are not present,
+then start the local API:
+
+```powershell
+.\scripts\fetch_targets.ps1
+.\scripts\fetch_flask_wheels.ps1
+.\scripts\start_local_engine.ps1
+```
+
+The first planner request downloads the pinned GraphCodeBERT model into the
+host Hugging Face cache if it is not cached already. The model runs on CPU and
+planner status reports download or inference failures; it does not substitute
+synthetic scores. Open a second terminal to start the UI from the host:
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+The UI is at [http://localhost:5173](http://localhost:5173). The host API is at
+[http://localhost:8000](http://localhost:8000). For bounded DAST, run the scan
+CLI from the project root in a third terminal; ZAP remains isolated in Docker
+and continues to use the Compose-only target network:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/run_scan.py configs/flask_demo.yaml --dast --dast-minutes 5
+```
+
+The five-minute limit covers ZAP startup, route tests, alert collection, and
+cleanup after the target is healthy and the plan is ready. Semgrep and planner
+time are reported separately. This CLI path does not require the engine image.
 
 Run a real SAST scan, or SAST followed by Semgrep-guided targeted DAST and
 broader route coverage, from this directory:

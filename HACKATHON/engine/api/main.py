@@ -8,6 +8,7 @@ import threading
 from collections.abc import AsyncIterator
 from typing import Literal
 
+import yaml
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -24,6 +25,7 @@ from ..patch_engine.llm_patcher import (
     generate_patch,
 )
 from ..dast_planner.planner import build_scan_plan
+from ..langgraph_loop.profile import load_target_profile
 from .graph import (
     GraphResponse,
     _profile_data,
@@ -226,10 +228,13 @@ def get_planner(target_id: TargetId) -> dict[str, object]:
     snapshot = get_graph_snapshot(target_id)
     profile = _profile_data(target_id)
     routes, _ = _routes_and_stats(target_id, profile)
-    target_url = profile.get("target_url")
+    try:
+        target_url = load_target_profile(target_id).origin
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        raise HTTPException(
+            status_code=500, detail="Target profile has an invalid target URL"
+        ) from exc
     source_root = _source_dir(profile.get("source_dir"))
-    if not isinstance(target_url, str):
-        raise HTTPException(status_code=500, detail="Target profile has no target URL")
     plan = build_scan_plan(
         target_id,
         target_url,

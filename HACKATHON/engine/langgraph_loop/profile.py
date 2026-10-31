@@ -50,7 +50,8 @@ def load_target_profile(target_id: str) -> RuntimeTargetProfile:
     if not isinstance(profile, dict) or profile.get("target_id") != target_id:
         raise ValueError(f"Target profile {target_id!r} is malformed")
 
-    raw_url = profile.get("target_url")
+    override_name = f"MITIGATA_TARGET_URL_{target_id.upper().replace('-', '_')}"
+    raw_url = os.environ.get(override_name, profile.get("target_url"))
     if not isinstance(raw_url, str):
         raise ValueError(f"Target profile {target_id!r} has no target_url")
     parsed = urlsplit(raw_url)
