@@ -274,20 +274,19 @@ function parseFile(filePath, rootDir) {
       if (methodOrUse === "use" && node.arguments.length >= 2) {
         const firstArg = node.arguments[0];
         const lastArg = node.arguments[node.arguments.length - 1];
-        if (ts.isStringLiteral(firstArg)) {
-          const targetName = ts.isIdentifier(lastArg)
-            ? lastArg.text
-            : ts.isCallExpression(lastArg) && ts.isIdentifier(lastArg.expression)
-            ? lastArg.expression.text
-            : null;
-          if (targetName) {
-            mounts.push({
-              parent_router: routerName,
-              prefix: firstArg.text,
-              target_router: targetName,
-              line: getLine(sourceFile, node.getStart(sourceFile)),
-            });
-          }
+        const targetName = ts.isIdentifier(lastArg)
+          ? lastArg.text
+          : ts.isCallExpression(lastArg) && ts.isIdentifier(lastArg.expression)
+          ? lastArg.expression.text
+          : null;
+        if (targetName) {
+          mounts.push({
+            parent_router: routerName,
+            prefix: ts.isStringLiteral(firstArg) ? firstArg.text : null,
+            target_router: targetName,
+            resolved: ts.isStringLiteral(firstArg),
+            line: getLine(sourceFile, node.getStart(sourceFile)),
+          });
         }
       }
 
@@ -419,7 +418,8 @@ function main() {
       const parsed = parseFile(f, rootDir);
       output[parsed.rel_path] = parsed;
     } catch (err) {
-      // Skip malformed third-party test fixtures safely
+      console.error(`Unable to parse ${path.relative(rootDir, f)}: ${err.message}`);
+      process.exitCode = 1;
     }
   }
   process.stdout.write(JSON.stringify(output));

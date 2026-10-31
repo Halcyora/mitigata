@@ -12,6 +12,8 @@ class RawExpressRoute:
     method: str
     handler: TSFunctionSymbol
     middlewares: List[str] = field(default_factory=list)
+    resolved: bool = True
+    unresolved_reason: str | None = None
 
 
 class ExpressRouteMapper:
@@ -19,8 +21,8 @@ class ExpressRouteMapper:
 
     def extract_routes(self, index: TSProjectIndex) -> List[RawExpressRoute]:
         # Step 2A: Map router file -> mounted URL prefix (e.g. app.use('/rest/user', userRouter))
-        file_prefixes: Dict[str, str] = {}
-        local_router_prefixes: Dict[tuple, str] = {}  # (rel_path, router_var) -> prefix
+        file_prefixes: Dict[str, List[str | None]] = {}
+        local_router_prefixes: Dict[tuple, List[str | None]] = {}
 
         for rel_path, file_ctx in index.files.items():
             for mount in file_ctx.mounts:
@@ -31,20 +33,23 @@ class ExpressRouteMapper:
                     imp = file_ctx.imports[target_router]
                     target_file = index.resolve_import_target_file(rel_path, imp["from"])
                     if target_file:
-                        file_prefixes[target_file] = join_url_paths(file_prefixes.get(target_file, ""), prefix)
+                        file_prefixes.setdefault(target_file, []).append(
+                            prefix if mount.get("resolved", True) else None
+                        )
                 else:
-                    local_router_prefixes[(rel_path, target_router)] = prefix
+                    local_router_prefixes.setdefault(
+                        (rel_path, target_router), []
+                    ).append(prefix if mount.get("resolved", True) else None)
 
         # Step 2B: Resolve every discovered route registration
         discovered: List[RawExpressRoute] = []
         for rel_path, file_ctx in index.files.items():
-            file_prefix = file_prefixes.get(rel_path, "")
-
             for route_entry in file_ctx.routes:
                 router_name = route_entry["router"]
-                local_prefix = local_router_prefixes.get((rel_path, router_name), "")
-                full_raw_url = join_url_paths(file_prefix, local_prefix, route_entry["path"])
-                norm_url = normalize_static_path(full_raw_url)
+                prefixes = file_prefixes.get(rel_path, [""])
+                local_prefixes = local_router_prefixes.get(
+                    (rel_path, router_name), [""]
+                )
                 method = route_entry["method"]
                 middlewares = route_entry.get("middlewares", [])
 
@@ -72,15 +77,31 @@ class ExpressRouteMapper:
                         )
 
                 methods = ["GET", "POST", "PUT", "DELETE", "PATCH"] if method == "ALL" else [method]
-                for m in methods:
-                    discovered.append(
-                        RawExpressRoute(
-                            raw_url=full_raw_url,
-                            normalized_url=norm_url,
-                            method=m,
-                            handler=handler_sym,
-                            middlewares=middlewares,
-                        )
-                    )
+                for file_prefix in prefixes:
+                    for local_prefix in local_prefixes:
+                        resolved = file_prefix is not None and local_prefix is not None
+                        path_parts = [
+                            part
+                            for part in (file_prefix, local_prefix, route_entry["path"])
+                            if part
+                        ]
+                        full_raw_url = join_url_paths(*path_parts)
+                        norm_url = normalize_static_path(full_raw_url)
+                        for m in methods:
+                            discovered.append(
+                                RawExpressRoute(
+                                    raw_url=full_raw_url,
+                                    normalized_url=norm_url,
+                                    method=m,
+                                    handler=handler_sym,
+                                    middlewares=middlewares,
+                                    resolved=resolved,
+                                    unresolved_reason=(
+                                        None
+                                        if resolved
+                                        else "router mount prefix is dynamic or unresolved"
+                                    ),
+                                )
+                            )
 
         return discovered

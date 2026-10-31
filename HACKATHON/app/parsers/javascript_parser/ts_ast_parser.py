@@ -107,6 +107,8 @@ class TypeScriptASTIndexer:
             capture_output=True,
             text=True,
             check=True,
+            encoding="utf-8",
+            errors="replace",
         )
         raw_data: Dict[str, Any] = json.loads(proc.stdout)
         index = TSProjectIndex(root_dir=root)

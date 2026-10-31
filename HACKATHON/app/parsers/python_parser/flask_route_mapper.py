@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Tuple
 from app.normalizer.route_normalizer import join_url_paths, normalize_static_path
 from app.parsers.python_parser.ast_parser import FunctionSymbol, PythonProjectIndex
 
-HTTP_METHOD_SHORTHANDS = {"get", "post", "put", "delete", "patch"}
+HTTP_METHOD_SHORTHANDS = {"get", "post", "put", "delete", "patch", "options", "head"}
 AUTH_DECORATOR_KEYWORDS = {"login_required", "jwt_required", "auth_required", "roles_required", "requires_auth"}
 
 
@@ -16,47 +16,70 @@ class RawFlaskRoute:
     method: str
     handler: FunctionSymbol
     middlewares: List[str] = field(default_factory=list)
+    resolved: bool = True
+    unresolved_reason: Optional[str] = None
 
 
 class FlaskRouteMapper:
     """Pass 2: Resolves Flask Blueprint prefixes and @route decorators into RawFlaskRoutes."""
 
     def extract_routes(self, index: PythonProjectIndex) -> List[RawFlaskRoute]:
-        # Key: (rel_file_path, blueprint_var_name) -> url_prefix
-        blueprint_prefixes: Dict[Tuple[str, str], str] = {}
-
-        # Step 2A: Find Blueprint instantiations: bp = Blueprint("orders", __name__, url_prefix="/api")
+        # Key: (rel_file_path, blueprint_var_name) -> declared prefix or unresolved.
+        blueprint_defaults: Dict[Tuple[str, str], Optional[str]] = {}
         for rel_path, file_ctx in index.files.items():
             for node in ast.walk(file_ctx.tree):
                 if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
                     if self._is_call_named(node.value, "Blueprint"):
-                        prefix = self._extract_kwarg_str(node.value, "url_prefix") or ""
+                        prefix = self._extract_kwarg_str(node.value, "url_prefix")
+                        if prefix is None and any(
+                            keyword.arg == "url_prefix" for keyword in node.value.keywords
+                        ):
+                            prefix = None
+                        else:
+                            prefix = prefix or ""
                         for target in node.targets:
                             if isinstance(target, ast.Name):
-                                blueprint_prefixes[(rel_path, target.id)] = prefix
+                                blueprint_defaults[(rel_path, target.id)] = prefix
 
-        # Step 2B: Find app.register_blueprint(orders_bp, url_prefix="/api/orders")
+        # A blueprint can be mounted at several prefixes; preserve each route.
+        blueprint_prefixes: Dict[Tuple[str, str], List[Optional[str]]] = {}
         for rel_path, file_ctx in index.files.items():
             for node in ast.walk(file_ctx.tree):
-                if isinstance(node, ast.Call) and self._is_method_named(node, "register_blueprint"):
+                if (
+                    isinstance(node, ast.Call)
+                    and self._is_method_named(node, "register_blueprint")
+                ):
                     if not node.args:
                         continue
                     bp_arg = node.args[0]
-                    reg_prefix = self._extract_kwarg_str(node, "url_prefix")
-                    if not reg_prefix or not isinstance(bp_arg, ast.Name):
+                    if not isinstance(bp_arg, ast.Name):
+                        continue
+                    local_key = (rel_path, bp_arg.id)
+                    if bp_arg.id in file_ctx.imports:
+                        target_mod, imported_name = file_ctx.imports[bp_arg.id]
+                        target_file = index._resolve_module_path(target_mod)
+                        blueprint_key = (
+                            (target_file, imported_name) if target_file else local_key
+                        )
+                    else:
+                        blueprint_key = local_key
+                    if blueprint_key not in blueprint_defaults:
                         continue
 
-                    bp_var = bp_arg.id
-                    # Check if the blueprint was imported from another file
-                    if bp_var in file_ctx.imports:
-                        target_mod, orig_bp_name = file_ctx.imports[bp_var]
-                        target_file = index._resolve_module_path(target_mod)
-                        if target_file:
-                            existing = blueprint_prefixes.get((target_file, orig_bp_name), "")
-                            blueprint_prefixes[(target_file, orig_bp_name)] = join_url_paths(reg_prefix, existing)
+                    default_prefix = blueprint_defaults[blueprint_key]
+                    registration = self._extract_kwarg_str(node, "url_prefix")
+                    dynamic_registration = registration is None and any(
+                        keyword.arg == "url_prefix" for keyword in node.keywords
+                    )
+                    if dynamic_registration or default_prefix is None:
+                        effective_prefix = None
                     else:
-                        existing = blueprint_prefixes.get((rel_path, bp_var), "")
-                        blueprint_prefixes[(rel_path, bp_var)] = join_url_paths(reg_prefix, existing)
+                        effective_prefix = join_url_paths(
+                            registration or "", default_prefix or ""
+                        )
+                    blueprint_prefixes.setdefault(blueprint_key, []).append(
+                        effective_prefix
+                    )
 
         # Step 2C: Extract @app.route / @bp.route / @app.get / @bp.post decorated functions
         discovered_routes: List[RawFlaskRoute] = []
@@ -69,30 +92,46 @@ class FlaskRouteMapper:
                 middlewares = self._extract_middlewares(fn_node.decorator_list)
 
                 for dec in fn_node.decorator_list:
-                    route_info = self._parse_route_decorator(dec, rel_path, blueprint_prefixes)
+                    route_info = self._parse_route_decorator(dec)
                     if not route_info:
                         continue
-                    full_raw_url, methods = route_info
-                    norm_url = normalize_static_path(full_raw_url)
-                    for m in methods:
-                        discovered_routes.append(
-                            RawFlaskRoute(
-                                raw_url=full_raw_url,
-                                normalized_url=norm_url,
-                                method=m.upper(),
-                                handler=fn_sym,
-                                middlewares=middlewares,
-                            )
+                    sub_path, methods, owner_name = route_info
+                    blueprint_key = (rel_path, owner_name)
+                    if blueprint_key in blueprint_defaults:
+                        prefixes = blueprint_prefixes.get(blueprint_key, [])
+                    else:
+                        prefixes = [""]
+                    for prefix in prefixes:
+                        resolved = prefix is not None
+                        full_raw_url = (
+                            join_url_paths(prefix, sub_path)
+                            if prefix is not None
+                            else join_url_paths(sub_path)
                         )
+                        norm_url = normalize_static_path(full_raw_url)
+                        for method in methods:
+                            discovered_routes.append(
+                                RawFlaskRoute(
+                                    raw_url=full_raw_url,
+                                    normalized_url=norm_url,
+                                    method=method.upper(),
+                                    handler=fn_sym,
+                                    middlewares=middlewares,
+                                    resolved=resolved,
+                                    unresolved_reason=(
+                                        None
+                                        if resolved
+                                        else "blueprint mount prefix is dynamic or unresolved"
+                                    ),
+                                )
+                            )
 
         return discovered_routes
 
     def _parse_route_decorator(
         self,
         dec: ast.AST,
-        rel_path: str,
-        blueprint_prefixes: Dict[Tuple[str, str], str],
-    ) -> Optional[Tuple[str, List[str]]]:
+    ) -> Optional[Tuple[str, List[str], str]]:
         if not isinstance(dec, ast.Call) or not isinstance(dec.func, ast.Attribute):
             return None
 
@@ -118,9 +157,7 @@ class FlaskRouteMapper:
         else:
             methods = self._extract_methods_kwarg(dec) or ["GET"]
 
-        bp_prefix = blueprint_prefixes.get((rel_path, owner_name), "")
-        full_url = join_url_paths(bp_prefix, sub_path)
-        return full_url, methods
+        return sub_path, methods, owner_name
 
     @staticmethod
     def _extract_middlewares(decorators: List[ast.AST]) -> List[str]:
