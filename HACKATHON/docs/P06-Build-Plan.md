@@ -317,18 +317,22 @@ services:
   target-flask:
     build: ./targets/vulnerable_flask
     container_name: mitigata-target-flask
+    ports:
+      - "127.0.0.1:5050:5050"
     networks:
-      - internal                    # target is never exposed to the host
+      - internal
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5050/"]
       interval: 10s
       timeout: 5s
       retries: 3
-    # Flask target port 5050; no host port mapping.
+    # Host access is restricted to localhost.
 
   target-juice-shop:
     build: ./targets/juice-shop
     container_name: mitigata-target-juice-shop
+    ports:
+      - "127.0.0.1:3001:3000"
     networks:
       - internal
     healthcheck:
@@ -337,7 +341,8 @@ services:
       timeout: 5s
       retries: 6
     # Build Juice Shop from the checked-out source used by the Express adapter.
-    # Pin checkout/image versions together; do not map the app port to the host.
+    # Host port 3001 avoids conflicting with the frontend on port 3000.
+    # Bind to localhost only; do not expose this intentionally vulnerable app to the LAN.
 
   engine:
     build: ./engine
@@ -1649,7 +1654,7 @@ COMPLIANCE_MAP: dict[str, dict] = {
 - [ ] All probes complete in < 2 seconds (check network tab)
 - [ ] No external network calls from probe nodes (check `docker logs mitigata-engine`)
 - [ ] `docker compose down && docker compose up --build` still works (idempotent)
-- [ ] Neither target is exposed to the host (`localhost:5050` and `localhost:3001` should fail)
+- [ ] Flask is reachable at `http://localhost:5050` and Juice Shop at `http://localhost:3001`; both ports are bound to localhost only
 
 ### 9.3 Fallback for demo failures
 

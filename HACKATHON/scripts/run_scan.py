@@ -21,6 +21,7 @@ from engine.adapters.base import TargetProfile
 from engine.ast_mapper.call_graph import build_call_graph
 from engine.dast_planner.planner import ScanPlan, build_scan_plan
 from engine.ingestion.semgrep_parser import parse_semgrep_json
+from engine.scan_manager.coordinator import apply_task_update, build_scan_state, persist_scan_state
 
 DATA_DIR = ROOT / "data"
 RAW_DIR = DATA_DIR / "raw"
@@ -236,6 +237,18 @@ def run_zap_plan(plan: ScanPlan) -> dict:
     target_id = plan.target_id
     plan_path = RAW_DIR / f"{target_id}-scan-plan.json"
     report_path = RAW_DIR / f"{target_id}-zap.json"
+    state_path = RAW_DIR / f"{target_id}-scan-state.json"
+    scan_state = build_scan_state(plan.to_dict())
+    scan_state.status = "RUNNING"
+    scan_state.started_at = plan.created_at
+    scan_state.record_event(
+        "PLAN_READY",
+        "PLANNED",
+        "Scan plan created and persisted",
+        task_id=None,
+        deadline_at=plan.deadline_at,
+    )
+    persist_scan_state(scan_state, state_path)
     write_json(plan_path, plan.to_dict())
 
     container_name = f"mitigata-zap-{uuid.uuid4().hex[:12]}"
@@ -307,6 +320,20 @@ def run_zap_plan(plan: ScanPlan) -> dict:
                 if field in task_dict:
                     setattr(task, field, task_dict[field])
         plan.status = str(report.get("scan_status", plan.status))
+        scan_state.status = plan.status
+        scan_state.cutoff = bool(report.get("coverage", {}).get("cutoff", False))
+        scan_state.update_status(plan.status)
+        for task in report.get("tasks", []):
+            apply_task_update(scan_state, task)
+        scan_state.record_event(
+            "SCAN_FINISHED",
+            "FINALIZING",
+            "Scan run complete",
+            scan_id=plan.scan_id,
+            status=plan.status,
+            coverage=report.get("coverage", {}),
+        )
+        persist_scan_state(scan_state, state_path)
         write_json(plan_path, plan.to_dict())
         write_json(report_path, report)
         return report

@@ -25,6 +25,8 @@ services:
     build:
       context: ./targets/vulnerable_flask
       dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:5050:5050"
     environment:
       APP_PORT: "5050"
     networks:
@@ -43,6 +45,8 @@ services:
 
   target-juice-shop:
     image: bkimminich/juice-shop:v20.3.0@sha256:cea5a4af4aacee498c491491af0408934ec81d004035c0a02ef3e54395e3bf27
+    ports:
+      - "127.0.0.1:3001:3000"
     networks:
       - internal
     healthcheck:
@@ -59,8 +63,8 @@ services:
 
   engine:
     build:
-      context: ./engine
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: engine/Dockerfile
     container_name: mitigata-engine
     ports:
       - "8000:8000"

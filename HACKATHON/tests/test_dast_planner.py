@@ -124,6 +124,29 @@ def test_plan_prioritizes_helper_scope_and_marks_shared_helper_ambiguous():
     assert all("MULTIPLE_ROUTE_CANDIDATES" in task.reason_codes for task in plan.targeted_tasks)
 
 
+def test_plan_recognizes_exact_scope_even_if_handler_scope_is_not_first_scope():
+    route = _route(
+        "/profile",
+        "render_profile",
+        30,
+        helper=("app/routes.py", 80, 95),
+        parameters=[ParameterRead(name="user_id", source="path")],
+    )
+    route.scopes = [
+        CodeScope(file="app/helpers.py", start_line=90, end_line=98, function="shared_helper"),
+        CodeScope(file="app/routes.py", start_line=30, end_line=40, function="render_profile"),
+    ]
+    finding = _finding("app/routes.py", 35)
+
+    plan = build_scan_plan(
+        "flask_demo", "http://target-flask:5050", [finding], [route]
+    )
+
+    assert len(plan.targeted_tasks) == 1
+    assert plan.targeted_tasks[0].priority_score < 100
+    assert "ROUTE_SCOPE_MATCH" in plan.targeted_tasks[0].reason_codes
+
+
 def test_plan_uses_lower_priority_for_incomplete_input_and_unknown_rules():
     no_inputs = _route("/item", "get_item", 10)
     unknown_rule = _finding("app/routes.py", 11, "CWE-999")

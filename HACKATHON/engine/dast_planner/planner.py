@@ -3,9 +3,11 @@ from __future__ import annotations
 import hashlib
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
+from typing import Any
 from uuid import uuid4
 
 from ..ast_mapper.route_schema import RouteNode
+from ..code_intelligence.shadow_ranker import GraphCodeBERTShadowRanker
 from ..ingestion.schema import UnifiedFinding
 
 PLANNER_VERSION = "1.0"
@@ -64,9 +66,14 @@ class ScanPlan:
     broad_tasks: list[ScanTask]
     unresolved_finding_ids: list[str]
     status: str = "PLANNED"
+    code_intelligence: dict[str, Any] = field(default_factory=dict)
+    intelligence_assessments: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["code_intelligence"] = self.code_intelligence
+        payload["intelligence_assessments"] = self.intelligence_assessments
+        return payload
 
 
 def _route_id(route: RouteNode) -> str:
@@ -116,16 +123,47 @@ def _matching_findings(
     ]
 
 
+def _scope_matches(finding: UnifiedFinding, scope) -> bool:
+    return (
+        finding.file is not None
+        and finding.line is not None
+        and scope.file == finding.file
+        and scope.start_line <= finding.line <= scope.end_line
+    )
+
+
+def _normalized_handler_name(route: RouteNode) -> tuple[str, ...]:
+    names = set()
+    if route.handler:
+        names.add(route.handler)
+        names.add(route.handler.rsplit(".", 1)[-1])
+        if route.handler.startswith("."):
+            names.add(route.handler.lstrip("."))
+    return tuple(sorted({name for name in names if name}))
+
+
 def _task_priority(
     route: RouteNode,
     matching: list[UnifiedFinding],
     routes: list[RouteNode],
 ) -> tuple[int, list[str]]:
-    is_exact_scope = any(
+    exact_scope = any(
         route.scopes
-        and finding.file == route.scopes[0].file
-        and finding.line is not None
-        and route.scopes[0].start_line <= finding.line <= route.scopes[0].end_line
+        and any(
+            _scope_matches(finding, scope)
+            and (scope.function in _normalized_handler_name(route) or scope.function == route.handler)
+            for scope in route.scopes
+        )
+        for finding in matching
+    )
+    helper_scope = any(
+        route.scopes
+        and any(
+            _scope_matches(finding, scope)
+            and scope.function not in _normalized_handler_name(route)
+            and scope.function != route.handler
+            for scope in route.scopes
+        )
         for finding in matching
     )
     supported_inputs = any(
@@ -144,13 +182,47 @@ def _task_priority(
     )
     if has_multiple_candidates:
         return 3, ["SAST_CWE_MATCH", "MULTIPLE_ROUTE_CANDIDATES"]
-    if is_exact_scope and supported_inputs:
+    if exact_scope and supported_inputs:
         return 0, ["SAST_CWE_MATCH", "ROUTE_SCOPE_MATCH", "PARAMETER_SURFACE_MATCH"]
-    if not is_exact_scope and supported_inputs:
+    if helper_scope and supported_inputs:
         return 1, ["SAST_CWE_MATCH", "HELPER_SCOPE_MATCH", "PARAMETER_SURFACE_MATCH"]
     if matching:
         return 2, ["SAST_CWE_MATCH", "ROUTE_SCOPE_MATCH", "INPUT_EVIDENCE_INCOMPLETE"]
     return 4, ["BROAD_COVERAGE"]
+
+
+def _shadow_rank_candidates(
+    scan_id: str,
+    target_id: str,
+    findings: list[UnifiedFinding],
+    routes: list[RouteNode],
+    *,
+    model_mode: str = "OFF",
+    source_revision: str | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    mode = str(model_mode or "OFF").upper()
+    metadata: dict[str, Any] = {
+        "mode": mode,
+        "model_id": "microsoft/graphcodebert-base",
+        "model_revision": "pinned-revision",
+        "task_head_version": "route-relevance-shadow-v1",
+        "preprocessor_version": "graphcodebert-dfg-v1",
+        "status": "SKIPPED",
+        "score_calibration": "UN_CALIBRATED",
+        "enabled": mode != "OFF",
+    }
+    if mode == "OFF":
+        return metadata, []
+
+    ranker = GraphCodeBERTShadowRanker(mode=mode, source_revision=source_revision, enabled=True)
+    assessments = ranker.assess_candidates(scan_id, target_id, findings, routes)
+    if not assessments:
+        return metadata, []
+
+    metadata["status"] = "AVAILABLE" if any(item.status == "AVAILABLE" for item in assessments) else "SKIPPED"
+    metadata["score_calibration"] = "UN_CALIBRATED"
+    metadata["status_detail"] = "Shadow-mode scoring is advisory only; it does not alter scheduling."
+    return metadata, [assessment.to_dict() for assessment in assessments]
 
 
 def build_scan_plan(
@@ -160,6 +232,8 @@ def build_scan_plan(
     routes: list[RouteNode],
     *,
     budget_minutes: int = 5,
+    model_mode: str = "OFF",
+    source_revision: str | None = None,
 ) -> ScanPlan:
     if not 1 <= budget_minutes <= 30:
         raise ValueError("budget_minutes must be between 1 and 30")
@@ -264,8 +338,17 @@ def build_scan_plan(
         key=lambda task: (task.normalized_url, task.method, task.task_id)
     )
     sast_ids = {finding.id for finding in findings if finding.source == "sast"}
+    scan_id = str(uuid4())
+    code_intelligence, intelligence_assessments = _shadow_rank_candidates(
+        scan_id,
+        target_id,
+        findings,
+        routes,
+        model_mode=model_mode,
+        source_revision=source_revision,
+    )
     return ScanPlan(
-        scan_id=str(uuid4()),
+        scan_id=scan_id,
         target_id=target_id,
         target_url=target_url,
         planner_version=PLANNER_VERSION,
@@ -275,4 +358,6 @@ def build_scan_plan(
         targeted_tasks=targeted,
         broad_tasks=broad_tasks,
         unresolved_finding_ids=sorted(sast_ids - mapped_finding_ids),
+        code_intelligence=code_intelligence,
+        intelligence_assessments=intelligence_assessments,
     )
