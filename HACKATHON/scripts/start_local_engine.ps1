@@ -35,6 +35,30 @@ try {
     $env:MITIGATA_TARGET_URL_JUICE_SHOP = "http://127.0.0.1:$juiceShopPort"
     $env:GRAPHCODEBERT_MODE = "ON"
 
+    $dotenvPath = Join-Path $projectRoot ".env"
+    if (Test-Path -LiteralPath $dotenvPath) {
+        foreach ($line in Get-Content -LiteralPath $dotenvPath) {
+            if ($line -match '^\s*(SARVAM_API_KEY|SARVAM_BASE_URL|SARVAM_MODEL|MITIGATA_CA_CERT_PATH)\s*=\s*(.*?)\s*$') {
+                $name = $Matches[1]
+                $value = $Matches[2]
+                if ($value.Length -ge 2 -and (
+                    ($value.StartsWith('"') -and $value.EndsWith('"')) -or
+                    ($value.StartsWith("'") -and $value.EndsWith("'"))
+                )) {
+                    $value = $value.Substring(1, $value.Length - 2)
+                }
+                [Environment]::SetEnvironmentVariable($name, $value, "Process")
+            }
+        }
+    }
+
+    if ($env:SARVAM_API_KEY) {
+        Write-Host "Sarvam patch suggestions are configured; no API request is made until you select Generate fix suggestion."
+    }
+    else {
+        Write-Host "Sarvam is not configured; supported findings use deterministic template suggestions."
+    }
+
     Write-Host "Starting the API locally. GraphCodeBERT weights load on first planner request if uncached."
     & $python -m uvicorn engine.api.main:app --host 127.0.0.1 --port 8000
     if ($LASTEXITCODE -ne 0) {

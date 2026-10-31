@@ -122,8 +122,13 @@ def apply_classification(
 
 def sort_findings(findings: Iterable[UnifiedFinding]) -> list[UnifiedFinding]:
     """Return findings in classifier priority order, preserving ties."""
-    priority = {"Confirmed": 0, "Code only": 1, "Runtime only": 2}
+    priority = {
+        "Confirmed": 0,
+        "Corroborated": 1,
+        "Code only": 2,
+        "Runtime only": 3,
+    }
     return sorted(
         findings,
-        key=lambda finding: priority.get(finding.label or "Code only", 1),
+        key=lambda finding: priority.get(finding.label or "Code only", 2),
     )

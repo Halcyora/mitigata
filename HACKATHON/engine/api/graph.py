@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 TargetId = Literal["flask_demo", "juice_shop"]
 NodeType = Literal["endpoint", "controller", "sink", "evidence", "suppressed"]
-FindingLabel = Literal["Confirmed", "Code only", "Runtime only"]
+FindingLabel = Literal["Confirmed", "Corroborated", "Code only", "Runtime only"]
 _CACHE_TTL_SECONDS = 10.0
 _CACHE: dict[str, tuple[float, GraphSnapshot]] = {}
 _CACHE_LOCK = threading.Lock()
@@ -43,6 +43,7 @@ class GraphNodeData(BaseModel):
     confidence: float | None = None
     file: str | None = None
     line: int | None = None
+    routes: list[str] = Field(default_factory=list)
     cwe: str | None = None
     evidence: str | None = None
     merged_from: list[str] = Field(default_factory=list)
@@ -72,6 +73,7 @@ class GraphStats(BaseModel):
     target_id: TargetId
     total: int
     confirmed: int
+    corroborated: int
     code_only: int
     runtime_only: int
     suppression_ratio: float = Field(ge=0.0, le=1.0)
@@ -267,6 +269,13 @@ def _finding_route_indices(
             for index, route in enumerate(routes)
             if route.resolved and route.contains_location(finding.file, finding.line)
         ]
+    if finding.routes:
+        route_paths = set(finding.routes)
+        return [
+            index
+            for index, route in enumerate(routes)
+            if route.resolved and route.normalized_url in route_paths
+        ]
     if not finding.url:
         return []
     path = urlparse(finding.url).path
@@ -331,6 +340,7 @@ def _build_snapshot(target_id: TargetId) -> GraphSnapshot:
                     confidence=finding.confidence,
                     file=finding.file,
                     line=finding.line,
+                    routes=finding.routes,
                     cwe=finding.cwe_id,
                     evidence=finding.evidence,
                     merged_from=finding.merged_from,
@@ -383,6 +393,7 @@ def _build_snapshot(target_id: TargetId) -> GraphSnapshot:
         target_id=target_id,
         total=len(findings),
         confirmed=labels.count("Confirmed"),
+        corroborated=labels.count("Corroborated"),
         code_only=labels.count("Code only"),
         runtime_only=labels.count("Runtime only"),
         suppression_ratio=float(route_stats.get("suppression_ratio", 0.0)),
@@ -412,3 +423,9 @@ def get_graph_snapshot(target_id: TargetId) -> GraphSnapshot:
     with _CACHE_LOCK:
         _CACHE[target_id] = (time.monotonic(), snapshot)
     return snapshot
+
+
+def clear_graph_snapshot_cache(target_id: TargetId) -> None:
+    """Force the next graph request to read reports written by a completed scan."""
+    with _CACHE_LOCK:
+        _CACHE.pop(target_id, None)

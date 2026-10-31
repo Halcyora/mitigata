@@ -26,11 +26,13 @@ from ..patch_engine.llm_patcher import (
 )
 from ..dast_planner.planner import build_scan_plan
 from ..langgraph_loop.profile import load_target_profile
+from ..scan_manager.jobs import ScanAlreadyRunning, scan_jobs
 from .graph import (
     GraphResponse,
     _profile_data,
     _routes_and_stats,
     _source_dir,
+    clear_graph_snapshot_cache,
     get_graph_snapshot,
 )
 
@@ -48,6 +50,11 @@ class PatchRequest(BaseModel):
 
 class PatchApplyRequest(PatchRequest):
     patch: str = Field(min_length=1, max_length=20_000)
+
+
+class ScanStartRequest(BaseModel):
+    target_id: TargetId
+    scan_type: Literal["sast", "dast"]
 
 
 class ComplianceResponse(BaseModel):
@@ -245,6 +252,35 @@ def get_planner(target_id: TargetId) -> dict[str, object]:
         source_root=source_root,
     )
     return plan.to_dict()
+
+
+@app.post("/api/scans", status_code=202)
+def start_scan(request: ScanStartRequest) -> dict[str, object]:
+    try:
+        return scan_jobs.start(request.target_id, request.scan_type)
+    except ScanAlreadyRunning as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": str(exc), "active_job": exc.job},
+        ) from exc
+
+
+@app.get("/api/scans/latest")
+def get_latest_scan(target_id: TargetId) -> dict[str, object] | None:
+    job = scan_jobs.latest(target_id)
+    if job and job["status"] in {"COMPLETED", "INCOMPLETE", "FAILED"}:
+        clear_graph_snapshot_cache(target_id)
+    return job
+
+
+@app.get("/api/scans/{job_id}")
+def get_scan(job_id: str) -> dict[str, object]:
+    job = scan_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Scan job not found")
+    if job["status"] in {"COMPLETED", "INCOMPLETE", "FAILED"}:
+        clear_graph_snapshot_cache(job["target_id"])
+    return job
 
 
 def _sse_event(payload: dict[str, object], event: str | None = None) -> str:

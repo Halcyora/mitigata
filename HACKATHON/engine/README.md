@@ -13,7 +13,7 @@ profile.
 - `ingestion/` normalization of Semgrep and ZAP raw output into `UnifiedFinding`
 - `ast_mapper/` sink detection, call-graph reachability, and route normalization
 - `langgraph_loop/` runtime verification and evidence-gathering workflow
-- `classifier/` triage into Confirmed / Code only / Runtime only
+- `classifier/` classification and finding priority helpers
 - `patch_engine/` patch generation and fallback strategy
 - `compliance/` scoring and policy mappings
 - `api/` API endpoints for scans and verification
@@ -30,8 +30,21 @@ named request keys. Dynamic route mounts are retained as unresolved records and
 cannot match DAST traffic. Sink coverage is reported per target in `stats`,
 including the measured `suppression_ratio`; ratios are not shared across target
 profiles. `enrich_findings_with_ast` attaches reachability to SAST findings, and
-`correlate_and_merge` confirms a pair only when target, CWE, route, HTTP method,
-source location, and the named parameter/source all agree.
+`correlate_and_merge` labels a pair `Confirmed` when target, CWE, route, HTTP
+method, source location, and named parameter/source all agree. If target, CWE,
+route, method, and source location agree but input evidence is unavailable, it
+labels the pair `Corroborated` at lower confidence. Explicitly mismatched input
+parameters still prevent correlation.
+
+Before correlation, `engine.ingestion.deduplication.deduplicate_findings`
+collapses repeated SAST reports by target/CWE/source location and DAST reports
+by target/CWE/rule/request surface. ZAP CORS and CSP policy alerts are
+target-wide, so repeated observations across routes and methods collapse into
+one issue while retaining source alert IDs in `merged_from`, observed route
+templates in `routes`, and combined evidence in `evidence`. Incremental DAST
+ingestion uses the same identity rules. Distinct rules at different source
+locations and distinct endpoint-specific alerts remain separate. The dashboard
+shows the retained routes and merged source IDs in the finding details.
 
 ## Phase 4 runtime verification
 
@@ -65,7 +78,8 @@ inconclusive probe labels do not imply runtime confirmation.
 
 Use `apply_classification` to create a copy of a `UnifiedFinding` with the
 resulting label and confidence, and `sort_findings` to keep findings in
-Confirmed, Code only, Runtime only priority order while preserving tie order.
+Confirmed, Corroborated, Code only, Runtime only priority order while
+preserving tie order.
 The helper does not mutate finding evidence or infer config-only/dual-confirmed
 status; callers must supply that evidence explicitly.
 
@@ -92,6 +106,15 @@ specific project and test it before applying. Unsupported sinks without an
 available LLM patch raise `PatchGenerationError`.
 
 ## Phase 7 graph API and dashboard
+
+`GET /api/planner` returns a plan preview; it does not start a scan. The
+dashboard has separate **Run SAST** and **Run targeted + broad DAST** actions.
+Both call `POST /api/scans` with the selected target and `scan_type`. SAST
+produces the Semgrep report; DAST reuses that report, builds a route plan, and
+executes targeted ZAP tasks before broad fallback tasks while the configured
+DAST budget remains. `GET /api/scans/latest?target_id=...` exposes the live
+phase and final task counts. A finished job invalidates the graph cache so the
+dashboard reloads findings. Only one scan may run at a time.
 
 `GET /api/graph?target_id=flask_demo` (or `juice_shop`) parses that profile's
 Semgrep/ZAP reports, maps its routes, correlates findings, and returns graph

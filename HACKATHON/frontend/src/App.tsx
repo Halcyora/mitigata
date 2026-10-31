@@ -16,6 +16,7 @@ const TARGETS: { id: TargetId; name: string; description: string }[] = [
 
 function labelClass(label?: string | null) {
   if (label === "Confirmed") return "badge-confirmed";
+  if (label === "Corroborated") return "badge-corroborated";
   if (label === "Runtime only") return "badge-runtime";
   if (label === "Code only") return "badge-code";
   return "badge-muted";
@@ -79,6 +80,12 @@ function FindingDetail({
           </div>
         )}
       </section>
+      {data.routes && data.routes.length > 0 && (
+        <section className="detail-section">
+          <h3>Observed routes</h3>
+          <ul>{data.routes.map((route) => <li key={route}><code>{route}</code></li>)}</ul>
+        </section>
+      )}
       {data.merged_from && data.merged_from.length > 0 && (
         <section className="detail-section"><h3>Correlation explanation</h3><p>{data.reason ?? "Code and runtime evidence were correlated."}</p><ul>{data.merged_from.map((id) => <li key={id}><code>{id}</code></li>)}</ul></section>
       )}
@@ -209,6 +216,11 @@ export default function App() {
             <span className="stat-dot confirmed" />
             <strong>{graphQuery.data.stats.confirmed}</strong>
             <span>Confirmed</span>
+          </div>
+          <div className="stat-item">
+            <span className="stat-dot corroborated" />
+            <strong>{graphQuery.data.stats.corroborated}</strong>
+            <span>Corroborated</span>
           </div>
           <div className="stat-item">
             <span className="stat-dot code" />

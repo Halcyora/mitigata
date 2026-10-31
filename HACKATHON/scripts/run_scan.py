@@ -160,13 +160,48 @@ def scan_report(
         process = run_compose(command)
         if process.returncode not in acceptable_returncodes:
             details = (process.stderr or process.stdout).strip()
+            certificate_help = ""
+            docker_help = ""
+            if scan_name == "semgrep" and (
+                "CERTIFICATE_VERIFY_FAILED" in details
+                or "self-signed certificate" in details
+            ):
+                certificate_help = (
+                    " Set MITIGATA_CA_CERT_PATH to a PEM CA certificate trusted by "
+                    "your machine, then restart the local API and retry."
+                )
+            if "permission denied while trying to connect to the docker API" in details.lower():
+                docker_help = (
+                    " The local API process cannot access Docker. Restart it from a "
+                    "terminal where `docker info` succeeds, then retry."
+                )
             raise RuntimeError(
                 f"{scan_name.upper()} scanner failed (exit {process.returncode}): "
-                f"{details[-2000:] or 'no diagnostic output'}"
+                f"{details[-2000:] or 'no diagnostic output'}.{certificate_help}{docker_help}"
             )
         if not temporary_path.is_file():
+            details = (process.stderr or process.stdout).strip()
+            diagnostic = details[-2000:] or "no diagnostic output"
+            certificate_help = ""
+            docker_help = ""
+            if scan_name == "semgrep" and (
+                "CERTIFICATE_VERIFY_FAILED" in details
+                or "self-signed certificate" in details
+            ):
+                certificate_help = (
+                    " Semgrep could not validate the HTTPS certificate while downloading "
+                    "its rule packs. Set MITIGATA_CA_CERT_PATH to a PEM CA certificate "
+                    "trusted by your machine, then restart the local API and retry."
+                )
+            if "permission denied while trying to connect to the docker api" in details.lower():
+                docker_help = (
+                    " The local API process cannot access Docker. Restart it from a "
+                    "terminal where `docker info` succeeds, then retry."
+                )
             raise RuntimeError(
-                f"{scan_name.upper()} scanner completed without creating its JSON report"
+                f"{scan_name.upper()} scanner exited with code {process.returncode} "
+                f"without creating its JSON report.{certificate_help}{docker_help} "
+                f"Diagnostic: {diagnostic}"
             )
         with temporary_path.open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
@@ -453,7 +488,10 @@ def count_zap_alerts(report: dict) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run containerized SAST/DAST scans for a target profile.")
     parser.add_argument("config", help="Path to a YAML profile file, e.g. configs/flask_demo.yaml")
-    parser.add_argument("--dast", action="store_true", help="Also run the bounded ZAP active scan")
+    scan_mode = parser.add_mutually_exclusive_group()
+    scan_mode.add_argument("--sast-only", action="store_true", help="Run Semgrep SAST only")
+    scan_mode.add_argument("--dast", action="store_true", help="Run SAST, then the bounded ZAP active scan")
+    scan_mode.add_argument("--dast-only", action="store_true", help="Run bounded ZAP using the existing Semgrep report")
     parser.add_argument("--dast-minutes", type=int, help="Override the 1-30 minute DAST time budget")
     args = parser.parse_args()
 
@@ -461,10 +499,11 @@ def main() -> int:
     print(f"Running profile: {profile.get('target_id')} ({profile.get('target_url')})")
 
     target_id = profile.get("target_id")
-    sast = run_semgrep(profile)
-    print(f"SAST output: {RAW_DIR / f'{target_id}-semgrep.json'} ({len(sast.get('results', []))} results)")
+    if not args.dast_only:
+        sast = run_semgrep(profile)
+        print(f"SAST output: {RAW_DIR / f'{target_id}-semgrep.json'} ({len(sast.get('results', []))} results)")
 
-    if args.dast:
+    if args.dast or args.dast_only:
         zap = run_dast(profile, budget_minutes=args.dast_minutes)
         coverage = zap.get("coverage", {})
         print(

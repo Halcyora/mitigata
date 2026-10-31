@@ -13,7 +13,7 @@ class UnifiedFinding(BaseModel):
     target_id: str
     source: Literal["sast", "dast"]
     cwe_id: str
-    label: Literal["Confirmed", "Code only", "Runtime only"] | None = None
+    label: Literal["Confirmed", "Corroborated", "Code only", "Runtime only"] | None = None
 
     file: str | None = None
     line: int | None = Field(default=None, ge=1)

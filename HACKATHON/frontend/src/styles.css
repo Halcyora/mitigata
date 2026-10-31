@@ -42,6 +42,7 @@ h1, h2, h3, p { margin-top: 0; }
 .stat-item strong, .stat-suppression strong, .cwe-coverage strong { color: #dce3ed; font-size: 13px; }
 .stat-dot { width: 7px; height: 7px; border-radius: 50%; }
 .confirmed { background: #ef4444; }
+.corroborated { background: #38bdf8; }
 .code { background: #eab308; }
 .runtime { background: #f97316; }
 .suppressed { background: #748197; }
@@ -61,6 +62,7 @@ h1, h2, h3, p { margin-top: 0; }
 .graph-node { width: 240px; min-height: 90px; display: flex; flex-direction: column; gap: 6px; padding: 12px 14px; border: 1px solid #39465b; border-left: 3px solid #71809a; border-radius: 9px; background: #131c2a; color: #e8edf5; box-shadow: 0 7px 22px #0005; }
 .graph-node.is-selected { outline: 1px solid #8a98ff; box-shadow: 0 0 0 3px #7785ff25; }
 .node-confirmed { border-left-color: #ef4444; }
+.node-corroborated { border-left-color: #38bdf8; }
 .node-code { border-left-color: #eab308; }
 .node-runtime { border-left-color: #f97316; }
 .node-suppressed { border-left-color: #68768b; opacity: .7; background: #121823; }
@@ -80,6 +82,7 @@ h1, h2, h3, p { margin-top: 0; }
 .detail-heading h2 { margin: 7px 0 0; font-size: 19px; }
 .status-badge { display: inline-flex; align-items: center; white-space: nowrap; padding: 5px 8px; border-radius: 6px; font-size: 10px; font-weight: 650; }
 .badge-confirmed { color: #ff8585; background: #ef44441c; border: 1px solid #ef444442; }
+.badge-corroborated { color: #8fdcff; background: #38bdf818; border: 1px solid #38bdf840; }
 .badge-code { color: #f2cf59; background: #eab30818; border: 1px solid #eab30840; }
 .badge-runtime { color: #ffad76; background: #f9731618; border: 1px solid #f9731640; }
 .badge-muted { color: #a7b2c2; background: #75839a18; border: 1px solid #75839a40; }
@@ -94,6 +97,14 @@ h1, h2, h3, p { margin-top: 0; }
 .planner-task-list article { display: grid; gap: 4px; padding: 9px; border: 1px solid #202c3d; border-radius: 7px; background: #0a101a; font-size: 10px; }
 .planner-task-list strong { color: #cbd5e3; }
 .planner-task-list span, .planner-task-list small { color: #8391a5; }
+.scan-controls { display: grid; gap: 9px; margin: 16px 0; padding: 12px; border: 1px solid #26334a; border-radius: 8px; background: #0b111b; }
+.scan-controls > p { margin: 0; color: #99a6b8; font-size: 11px; line-height: 1.5; }
+.scan-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+.scan-controls .verify-button { justify-self: start; }
+.scan-controls > small { color: #77869b; font-size: 10px; line-height: 1.5; }
+.scan-job-status { display: grid; gap: 5px; color: #99a6b8; font-size: 11px; overflow-wrap: anywhere; }
+.scan-job-status strong { color: #d4dceb; }
+.scan-job-status small { color: #77869b; }
 .detail-section h3, .probe-history h3 { margin: 0 0 12px; color: #8997aa; font-size: 10px; letter-spacing: .7px; text-transform: uppercase; }
 .code-location { display: flex; color: #9facbf; font-size: 12px; }
 .code-location code { color: #d3dbea; overflow-wrap: anywhere; }

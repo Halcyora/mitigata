@@ -12,7 +12,7 @@ from .assessment_schema import CodeContextAssessment
 
 MODEL_ID = "microsoft/graphcodebert-base"
 MODEL_REVISION = "9b8660679da59fe3e7423b03efa48d41944eec42"
-TASK_HEAD_VERSION = "cosine-retrieval-v1"
+TASK_HEAD_VERSION = "masked-mean-cosine-v1"
 PREPROCESSOR_VERSION = "lexical-dataflow-graph-mask-v1"
 QUERY_SEQUENCE_LENGTH = 128
 CODE_SEQUENCE_LENGTH = 256
@@ -66,6 +66,7 @@ def _load_model() -> tuple[Any, Any, Any]:
                 MODEL_ID,
                 revision=MODEL_REVISION,
                 use_safetensors=True,
+                add_pooling_layer=False,
             )
             model.to("cpu")
             model.eval()
@@ -163,11 +164,19 @@ def _graph_code_embedding(code: str, tokenizer: Any, model: Any, torch: Any) -> 
         embeddings * (~nodes_mask)[:, :, None]
         + node_embeddings * nodes_mask[:, :, None]
     )
-    return model(
+    outputs = model(
         inputs_embeds=embeddings,
         attention_mask=attention,
         position_ids=position_idx,
-    ).pooler_output
+    )
+    return _masked_mean(outputs.last_hidden_state, token_mask, torch)
+
+
+def _masked_mean(hidden_states: Any, mask: Any, torch: Any) -> Any:
+    weights = mask.unsqueeze(-1).to(hidden_states.dtype)
+    summed = torch.sum(hidden_states * weights, dim=1)
+    denominator = torch.sum(weights, dim=1).clamp_min(1e-9)
+    return summed / denominator
 
 
 def _read_route_context(
@@ -288,10 +297,15 @@ class GraphCodeBERTShadowRanker:
                             max_length=QUERY_SEQUENCE_LENGTH,
                             return_tensors="pt",
                         )
-                        query_vector = model(
+                        query_outputs = model(
                             input_ids=query_inputs["input_ids"],
                             attention_mask=query_inputs["attention_mask"],
-                        ).pooler_output
+                        )
+                        query_vector = _masked_mean(
+                            query_outputs.last_hidden_state,
+                            query_inputs["attention_mask"].bool(),
+                            torch,
+                        )
                         code_vector = _graph_code_embedding(code, tokenizer, model, torch)
                         vectors = torch.nn.functional.normalize(
                             torch.cat((query_vector, code_vector), dim=0), p=2, dim=1

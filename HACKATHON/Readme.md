@@ -87,7 +87,10 @@ The first scan pulls the pinned scanner images. Semgrep also needs outbound
 network access to resolve configured rule packs. If your network inspects TLS
 and Semgrep cannot validate its certificate chain, set `MITIGATA_CA_CERT_PATH`
 to a PEM CA certificate trusted by your machine; the runner mounts it read-only
-for Semgrep and keeps certificate verification enabled. For DAST, the AST route
+for Semgrep and keeps certificate verification enabled. In the local-engine
+setup, put `MITIGATA_CA_CERT_PATH=C:\path\to\trusted-ca.pem` in `.env` before
+running `scripts/start_local_engine.ps1`, or set the variable in PowerShell
+before launching the API. For DAST, the AST route
 inventory is joined to normalized Semgrep findings by target-relative file and
 line scope. Explainable priority tiers schedule mapped route/method/CWE rule
 tasks first; ZAP enables only the mapped scanners for those tasks, then tests

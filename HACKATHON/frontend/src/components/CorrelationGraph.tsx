@@ -31,11 +31,13 @@ function CorrelationNode({ data, type, selected }: NodeProps<FlowNode>) {
       ? "suppressed"
       : label === "Confirmed"
         ? "confirmed"
-        : label === "Runtime only"
-          ? "runtime"
-          : label === "Code only"
-            ? "code"
-            : type;
+        : label === "Corroborated"
+          ? "corroborated"
+          : label === "Runtime only"
+            ? "runtime"
+            : label === "Code only"
+              ? "code"
+              : type;
 
   return (
     <div className={`graph-node node-${tone}${selected ? " is-selected" : ""}`}>
@@ -190,6 +192,7 @@ export function CorrelationGraph({
               const label = (node.data as GraphNodeData).finding_label;
               if (node.type === "suppressed") return "#536174";
               if (label === "Confirmed") return "#ef4444";
+              if (label === "Corroborated") return "#38bdf8";
               if (label === "Code only") return "#eab308";
               if (label === "Runtime only") return "#f97316";
               return "#687993";
@@ -200,6 +203,7 @@ export function CorrelationGraph({
       )}
       <div className="graph-legend">
         <span><i className="legend-dot confirmed" />Confirmed</span>
+        <span><i className="legend-dot corroborated" />Corroborated</span>
         <span><i className="legend-dot code" />Code only</span>
         <span><i className="legend-dot runtime" />Runtime only</span>
         <span><i className="legend-dot suppressed" />Suppressed</span>

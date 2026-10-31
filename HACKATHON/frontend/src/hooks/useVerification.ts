@@ -14,7 +14,10 @@ type VerificationStatus = "idle" | "running" | "done" | "error";
 
 function isFindingLabel(value: string): value is FindingLabel {
   return (
-    value === "Confirmed" || value === "Code only" || value === "Runtime only"
+    value === "Confirmed" ||
+    value === "Corroborated" ||
+    value === "Code only" ||
+    value === "Runtime only"
   );
 }
 
@@ -104,6 +107,8 @@ export function useVerification(findingId: string | null, targetId: TargetId) {
             stats: {
               ...current.stats,
               confirmed: labels.filter((value) => value === "Confirmed").length,
+              corroborated: labels.filter((value) => value === "Corroborated")
+                .length,
               code_only: labels.filter((value) => value === "Code only").length,
               runtime_only: labels.filter((value) => value === "Runtime only")
                 .length,

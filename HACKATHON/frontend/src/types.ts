@@ -1,5 +1,5 @@
 export type TargetId = "flask_demo" | "juice_shop";
-export type FindingLabel = "Confirmed" | "Code only" | "Runtime only";
+export type FindingLabel = "Confirmed" | "Corroborated" | "Code only" | "Runtime only";
 export type GraphNodeType =
   | "endpoint"
   | "controller"
@@ -16,6 +16,7 @@ export interface GraphNodeData {
   confidence?: number | null;
   file?: string | null;
   line?: number | null;
+  routes?: string[];
   cwe?: string | null;
   evidence?: string | null;
   merged_from?: string[];
@@ -45,6 +46,7 @@ export interface GraphStats {
   target_id: TargetId;
   total: number;
   confirmed: number;
+  corroborated: number;
   code_only: number;
   runtime_only: number;
   suppression_ratio: number;
@@ -102,6 +104,25 @@ export interface ScanPlan {
     status_detail?: string;
   };
   intelligence_assessments: CodeContextAssessment[];
+}
+
+export interface ScanJob {
+  job_id: string;
+  target_id: TargetId;
+  scan_type: "sast" | "dast";
+  status: "SAST_RUNNING" | "DAST_RUNNING" | "SAST_COMPLETED" | "COMPLETED" | "INCOMPLETE" | "FAILED";
+  phase: "SAST" | "DAST" | "FINISHED";
+  message: string;
+  started_at: string;
+  finished_at: string | null;
+  scan_id: string | null;
+  budget_minutes: number | null;
+  targeted_total: number;
+  targeted_completed: number;
+  broad_total: number;
+  broad_completed: number;
+  cutoff: boolean;
+  error: string | null;
 }
 
 export interface ProbeRecord {
