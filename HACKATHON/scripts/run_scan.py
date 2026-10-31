@@ -8,6 +8,7 @@ import secrets
 import subprocess
 import sys
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -89,7 +90,9 @@ def validate_target(profile: dict) -> tuple[str, str]:
     return expected_service, parsed_url.geturl()
 
 
-def run_compose(command: list[str]) -> subprocess.CompletedProcess[str]:
+def run_compose(
+    command: list[str], *, timeout_seconds: float | None = None
+) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
             ["docker", "compose", *command],
@@ -99,7 +102,10 @@ def run_compose(command: list[str]) -> subprocess.CompletedProcess[str]:
             encoding="utf-8",
             errors="replace",
             check=False,
+            timeout=timeout_seconds,
         )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("Docker Compose command exceeded the DAST time budget") from exc
     except FileNotFoundError as exc:
         raise RuntimeError("Docker Compose is required to run containerized scans") from exc
 
@@ -108,6 +114,7 @@ def run_docker(
     command: list[str],
     *,
     input_text: str | None = None,
+    timeout_seconds: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
@@ -119,7 +126,10 @@ def run_docker(
             encoding="utf-8",
             errors="replace",
             check=False,
+            timeout=timeout_seconds,
         )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("Docker command exceeded the DAST time budget") from exc
     except FileNotFoundError as exc:
         raise RuntimeError("Docker is required to run containerized scans") from exc
 
@@ -221,7 +231,12 @@ def run_semgrep(profile: dict) -> dict:
     return report
 
 
-def _build_profile_scan_plan(profile: dict, budget_minutes: int) -> ScanPlan:
+def _build_profile_scan_plan(
+    profile: dict,
+    budget_minutes: int,
+    *,
+    deadline_at: str | None = None,
+) -> ScanPlan:
     target_id = profile["target_id"]
     _, target_url = validate_target(profile)
     source_dir = resolve_source_dir(profile["source_dir"])
@@ -254,6 +269,10 @@ def _build_profile_scan_plan(profile: dict, budget_minutes: int) -> ScanPlan:
         findings,
         routes,
         budget_minutes=budget_minutes,
+        model_mode=os.getenv("GRAPHCODEBERT_MODE", "ON"),
+        source_revision=str(profile.get("target_revision") or "unknown"),
+        source_root=source_dir,
+        deadline_at=deadline_at,
     )
 
 
@@ -277,29 +296,38 @@ def run_zap_plan(plan: ScanPlan) -> dict:
 
     container_name = f"mitigata-zap-{uuid.uuid4().hex[:12]}"
     api_key = secrets.token_urlsafe(32)
-    started = run_compose(
-        [
-            "--profile",
-            "scanners",
-            "run",
-            "--detach",
-            "--name",
-            container_name,
-            "--no-deps",
-            "--entrypoint",
-            "zap.sh",
-            "zap",
-            "-daemon",
-            "-host",
-            "127.0.0.1",
-            "-port",
-            "8090",
-            "-config",
-            f"api.key={api_key}",
-            "-config",
-            "telemetry.enabled=false",
-        ]
+    remaining_seconds = max(
+        0.1,
+        (datetime.fromisoformat(plan.deadline_at) - datetime.now(timezone.utc)).total_seconds(),
     )
+    try:
+        started = run_compose(
+            [
+                "--profile",
+                "scanners",
+                "run",
+                "--detach",
+                "--name",
+                container_name,
+                "--no-deps",
+                "--entrypoint",
+                "zap.sh",
+                "zap",
+                "-daemon",
+                "-host",
+                "127.0.0.1",
+                "-port",
+                "8090",
+                "-config",
+                f"api.key={api_key}",
+                "-config",
+                "telemetry.enabled=false",
+            ],
+            timeout_seconds=remaining_seconds,
+        )
+    except RuntimeError:
+        run_docker(["rm", "-f", container_name], timeout_seconds=5)
+        raise
     if started.returncode != 0:
         details = (started.stderr or started.stdout).strip()
         raise RuntimeError(
@@ -309,6 +337,10 @@ def run_zap_plan(plan: ScanPlan) -> dict:
 
     driver_input = json.dumps({"api_key": api_key, "plan": plan.to_dict()})
     try:
+        driver_timeout = max(
+            0.1,
+            (datetime.fromisoformat(plan.deadline_at) - datetime.now(timezone.utc)).total_seconds(),
+        )
         execution = run_docker(
             [
                 "exec",
@@ -318,6 +350,7 @@ def run_zap_plan(plan: ScanPlan) -> dict:
                 "/workspace/zap_api_driver.py",
             ],
             input_text=driver_input,
+            timeout_seconds=driver_timeout,
         )
         if execution.returncode != 0:
             details = (execution.stderr or execution.stdout).strip()
@@ -362,7 +395,7 @@ def run_zap_plan(plan: ScanPlan) -> dict:
         write_json(report_path, report)
         return report
     finally:
-        stopped = run_docker(["rm", "-f", container_name])
+        stopped = run_docker(["rm", "-f", container_name], timeout_seconds=5)
         if stopped.returncode != 0:
             details = (stopped.stderr or stopped.stdout).strip()
             raise RuntimeError(
@@ -380,6 +413,8 @@ def run_dast(profile: dict, *, budget_minutes: int | None = None) -> dict:
     if not 1 <= selected_budget <= 30:
         raise ValueError("DAST time budget must be between 1 and 30 minutes")
 
+    # DAST needs a live target and a completed plan; the five-minute clock is
+    # the bounded ZAP execution window and includes ZAP startup and cleanup.
     target_start = run_compose(["up", "--detach", "--wait", service])
     if target_start.returncode != 0:
         details = (target_start.stderr or target_start.stdout).strip()
@@ -389,6 +424,8 @@ def run_dast(profile: dict, *, budget_minutes: int | None = None) -> dict:
         )
 
     plan = _build_profile_scan_plan(profile, selected_budget)
+    deadline = datetime.now(timezone.utc) + timedelta(minutes=selected_budget)
+    plan.deadline_at = deadline.isoformat()
     return run_zap_plan(plan)
 
 

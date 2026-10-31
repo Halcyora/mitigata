@@ -3,11 +3,19 @@ from __future__ import annotations
 import hashlib
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from ..ast_mapper.route_schema import RouteNode
-from ..code_intelligence.shadow_ranker import GraphCodeBERTShadowRanker
+from ..code_intelligence.shadow_ranker import (
+    GraphCodeBERTShadowRanker,
+    MODEL_ID,
+    MODEL_REVISION,
+    PREPROCESSOR_VERSION,
+    TASK_HEAD_VERSION,
+    route_candidate_id,
+)
 from ..ingestion.schema import UnifiedFinding
 
 PLANNER_VERSION = "1.0"
@@ -77,11 +85,7 @@ class ScanPlan:
 
 
 def _route_id(route: RouteNode) -> str:
-    identity = (
-        f"{route.target_id}|{route.raw_url}|{','.join(sorted(route.methods))}|"
-        f"{route.handler}|{route.scopes[0].file if route.scopes else ''}"
-    )
-    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+    return route_candidate_id(route)
 
 
 def _task_id(
@@ -199,14 +203,15 @@ def _shadow_rank_candidates(
     *,
     model_mode: str = "OFF",
     source_revision: str | None = None,
+    source_root: Path | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     mode = str(model_mode or "OFF").upper()
     metadata: dict[str, Any] = {
         "mode": mode,
-        "model_id": "microsoft/graphcodebert-base",
-        "model_revision": "pinned-revision",
-        "task_head_version": "route-relevance-shadow-v1",
-        "preprocessor_version": "graphcodebert-dfg-v1",
+        "model_id": MODEL_ID,
+        "model_revision": MODEL_REVISION,
+        "task_head_version": TASK_HEAD_VERSION,
+        "preprocessor_version": PREPROCESSOR_VERSION,
         "status": "SKIPPED",
         "score_calibration": "UN_CALIBRATED",
         "enabled": mode != "OFF",
@@ -214,14 +219,28 @@ def _shadow_rank_candidates(
     if mode == "OFF":
         return metadata, []
 
-    ranker = GraphCodeBERTShadowRanker(mode=mode, source_revision=source_revision, enabled=True)
+    ranker = GraphCodeBERTShadowRanker(
+        mode=mode,
+        source_revision=source_revision,
+        enabled=True,
+        source_root=source_root,
+    )
     assessments = ranker.assess_candidates(scan_id, target_id, findings, routes)
     if not assessments:
         return metadata, []
 
-    metadata["status"] = "AVAILABLE" if any(item.status == "AVAILABLE" for item in assessments) else "SKIPPED"
+    metadata["status"] = (
+        "ERROR"
+        if any(item.status == "ERROR" for item in assessments)
+        else "AVAILABLE"
+        if any(item.status == "AVAILABLE" for item in assessments)
+        else "SKIPPED"
+    )
     metadata["score_calibration"] = "UN_CALIBRATED"
-    metadata["status_detail"] = "Shadow-mode scoring is advisory only; it does not alter scheduling."
+    metadata["status_detail"] = (
+        "Pinned GraphCodeBERT inference ranks deterministic ambiguous candidates; "
+        "its uncalibrated score is advisory only."
+    )
     return metadata, [assessment.to_dict() for assessment in assessments]
 
 
@@ -234,6 +253,8 @@ def build_scan_plan(
     budget_minutes: int = 5,
     model_mode: str = "OFF",
     source_revision: str | None = None,
+    source_root: Path | None = None,
+    deadline_at: str | None = None,
 ) -> ScanPlan:
     if not 1 <= budget_minutes <= 30:
         raise ValueError("budget_minutes must be between 1 and 30")
@@ -245,6 +266,21 @@ def build_scan_plan(
         raise ValueError("Semgrep findings contain a different target_id")
 
     created = datetime.now(timezone.utc)
+    scan_id = str(uuid4())
+    code_intelligence, intelligence_assessments = _shadow_rank_candidates(
+        scan_id,
+        target_id,
+        findings,
+        routes,
+        model_mode=model_mode,
+        source_revision=source_revision,
+        source_root=source_root,
+    )
+    model_scores = {
+        (item["finding_id"], item["candidate_route_id"]): float(item["relevance_score"])
+        for item in intelligence_assessments
+        if item.get("status") == "AVAILABLE"
+    }
     targeted_by_key: dict[tuple[str, str, str], ScanTask] = {}
     broad_tasks: list[ScanTask] = []
     mapped_finding_ids: set[str] = set()
@@ -268,7 +304,7 @@ def build_scan_plan(
             for method in methods:
                 for finding in supported_findings:
                     rule_ids = ZAP_RULES_BY_CWE[finding.cwe_id]
-                    key = (route_id, method, ",".join(rule_ids))
+                    key = (route_id, method, "ALL_TARGETED_RULES")
                     task = targeted_by_key.get(key)
                     if task is None:
                         finding_priority = _SEVERITY_ORDER.get(
@@ -282,9 +318,9 @@ def build_scan_plan(
                             normalized_url=route.normalized_url,
                             method=method,
                             phase="TARGETED",
-                            priority_score=priority_class * 100 + finding_priority,
+                            priority_score=priority_class * 100 + finding_priority * 10,
                             reason_codes=list(base_reasons),
-                            zap_rule_ids=list(rule_ids),
+                            zap_rule_ids=[],
                             parameters=[
                                 {"name": parameter.name, "source": parameter.source}
                                 for parameter in route.input_parameters
@@ -294,10 +330,21 @@ def build_scan_plan(
                         targeted_by_key[key] = task
                     if finding.id not in task.finding_ids:
                         task.finding_ids.append(finding.id)
+                    task.zap_rule_ids = sorted(set(task.zap_rule_ids) | set(rule_ids))
+                    model_score = model_scores.get((finding.id, route_id))
+                    if model_score is not None and priority_class == 3:
+                        if "GRAPHCODEBERT_TIEBREAK" not in task.reason_codes:
+                            task.reason_codes.append("GRAPHCODEBERT_TIEBREAK")
+                    model_tiebreak = (
+                        9 - min(9, int(model_score * 10))
+                        if model_score is not None and priority_class == 3
+                        else 0
+                    )
                     task.priority_score = min(
                         task.priority_score,
                         priority_class * 100
-                        + _SEVERITY_ORDER.get(finding.severity.upper(), 5),
+                        + _SEVERITY_ORDER.get(finding.severity.upper(), 5) * 10
+                        + model_tiebreak,
                     )
                     for reason in base_reasons:
                         if reason not in task.reason_codes:
@@ -330,6 +377,14 @@ def build_scan_plan(
                 )
             )
 
+    for task in targeted_by_key.values():
+        task.task_id = _task_id(
+            task.route_id,
+            task.method,
+            "TARGETED",
+            tuple(sorted(task.zap_rule_ids)),
+        )
+
     targeted = sorted(
         targeted_by_key.values(),
         key=lambda task: (task.priority_score, task.normalized_url, task.method, task.task_id),
@@ -338,15 +393,12 @@ def build_scan_plan(
         key=lambda task: (task.normalized_url, task.method, task.task_id)
     )
     sast_ids = {finding.id for finding in findings if finding.source == "sast"}
-    scan_id = str(uuid4())
-    code_intelligence, intelligence_assessments = _shadow_rank_candidates(
-        scan_id,
-        target_id,
-        findings,
-        routes,
-        model_mode=model_mode,
-        source_revision=source_revision,
-    )
+    if deadline_at is None:
+        final_deadline = created + timedelta(minutes=budget_minutes)
+    else:
+        final_deadline = datetime.fromisoformat(deadline_at)
+        if final_deadline.tzinfo is None:
+            raise ValueError("deadline_at must include a timezone")
     return ScanPlan(
         scan_id=scan_id,
         target_id=target_id,
@@ -354,7 +406,7 @@ def build_scan_plan(
         planner_version=PLANNER_VERSION,
         rule_mapping_version=RULE_MAPPING_VERSION,
         created_at=created.isoformat(),
-        deadline_at=(created + timedelta(minutes=budget_minutes)).isoformat(),
+        deadline_at=final_deadline.astimezone(timezone.utc).isoformat(),
         targeted_tasks=targeted,
         broad_tasks=broad_tasks,
         unresolved_finding_ids=sorted(sast_ids - mapped_finding_ids),

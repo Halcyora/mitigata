@@ -62,6 +62,20 @@ def test_request_data_binds_only_supported_query_and_form_inputs():
     assert post_body == "name=mitigata_scan"
 
 
+def test_raw_seed_request_preserves_route_and_does_not_invent_json_inputs():
+    assert zap_api_driver._raw_seed_request(
+        "http://target-juice-shop:3000/rest/user/login",
+        "POST",
+        None,
+    ) == (
+        "POST /rest/user/login HTTP/1.1\r\n"
+        "Host: target-juice-shop:3000\r\n"
+        "Connection: close\r\n"
+        "Content-Length: 0\r\n"
+        "\r\n"
+    )
+
+
 def test_scan_progress_handles_zap_plugin_status_shape():
     assert zap_api_driver._scan_progress_complete(
         {
@@ -125,10 +139,6 @@ def test_execute_runs_targeted_tasks_before_broad_and_limits_context(monkeypatch
                 }
             if (component, operation, name) == ("ascan", "view", "scanProgress"):
                 return {"scanProgress": "100"}
-            if (component, operation, name) == ("spider", "action", "scan"):
-                return {"scan": "0"}
-            if (component, operation, name) == ("spider", "view", "status"):
-                return {"status": "100"}
             if (component, operation, name) == ("alert", "view", "alerts"):
                 return {"alerts": []}
             return {"Result": "OK"}
@@ -195,11 +205,75 @@ def test_execute_runs_targeted_tasks_before_broad_and_limits_context(monkeypatch
         "url": "http://target-flask:5050/orders?q=mitigata_scan",
         "followRedirects": "false",
     }
-    spiders = [call for call in calls if call[:3] == ("spider", "action", "scan")]
     scans = [call for call in calls if call[:3] == ("ascan", "action", "scan")]
-    assert spiders[0][3]["url"].endswith("?q=mitigata_scan")
-    assert spiders[0][3]["contextName"].startswith("mitigata-")
-    assert spiders[0][3]["subtreeOnly"] == "true"
     assert scans[0][3]["url"].endswith("?q=mitigata_scan")
     assert scans[0][3]["contextId"] == "1"
     assert scans[1][3]["contextId"] == "1"
+
+
+def test_task_timeout_does_not_prevent_broad_phase(monkeypatch):
+    calls = []
+    scan_count = 0
+
+    class FakeZapClient:
+        def __init__(self, api_key):
+            assert api_key == "unit-test-key"
+
+        def wait_ready(self):
+            return None
+
+        def request(self, component, operation, name, **params):
+            nonlocal scan_count
+            calls.append((component, operation, name, params))
+            if (component, operation, name) == ("context", "action", "newContext"):
+                return {"contextId": "1"}
+            if (component, operation, name) == ("ascan", "view", "scanners"):
+                return {"scanners": []}
+            if (component, operation, name) == ("ascan", "action", "scan"):
+                scan_count += 1
+                return {"scan": str(scan_count)}
+            if (component, operation, name) == ("ascan", "view", "scanProgress"):
+                return {"scanProgress": "0" if params["scanId"] == "1" else "100"}
+            if (component, operation, name) == ("alert", "view", "alerts"):
+                return {"alerts": []}
+            return {"Result": "OK"}
+
+    monkeypatch.setattr(zap_api_driver, "ZapClient", FakeZapClient)
+    monkeypatch.setattr(zap_api_driver, "TASK_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(zap_api_driver, "POLL_INTERVAL_SECONDS", 0.01)
+    task = {
+        "task_id": "task",
+        "target_id": "flask_demo",
+        "route_id": "route",
+        "raw_url": "/orders",
+        "normalized_url": "/orders",
+        "method": "GET",
+        "phase": "TARGETED",
+        "zap_rule_ids": [],
+        "excluded_zap_rule_ids": [],
+        "parameters": [],
+        "status": "QUEUED",
+    }
+    broad = {**task, "task_id": "broad", "phase": "BROAD"}
+    deadline = datetime.now(timezone.utc) + timedelta(minutes=1)
+
+    report = zap_api_driver.execute(
+        {
+            "api_key": "unit-test-key",
+            "plan": {
+                "scan_id": "scan-timeout",
+                "target_id": "flask_demo",
+                "target_url": "http://target-flask:5050",
+                "deadline_at": deadline.isoformat(),
+                "targeted_tasks": [task],
+                "broad_tasks": [broad],
+            },
+        }
+    )
+
+    assert [item["status"] for item in report["tasks"]] == [
+        "TIMED_OUT",
+        "COMPLETED",
+    ]
+    assert report["scan_status"] == "INCOMPLETE"
+    assert scan_count == 2

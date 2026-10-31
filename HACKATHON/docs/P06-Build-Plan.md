@@ -36,7 +36,7 @@ against its own pinned-revision ground truth and report those results separately
 | Wrong links | < 20% | < 5% | AST reachability gates correlation |
 | False alarms | < 30% | < 10% | Parameterised query detection (B-2) |
 | Unseen app | > 40% | > 65% | Shared route contract + framework adapters |
-| Run time | < 15 min | < 5 min | Selected target profile + pre-seeded fallback data |
+| Run time | < 15 min | < 5 min | ZAP execution hard-capped at 5 min after the selected target is healthy and the route-aware plan is ready; full pipeline time is measured separately |
 
 ### FR-to-Component Mapping
 
@@ -136,14 +136,16 @@ This preserves the existing architecture constraints:
 
 ### Mandatory GraphCodeBERT requirement
 
-GraphCodeBERT is not optional in this build plan. It is mandatory in shadow mode or advisory ranking mode, and it must be integrated into the planner flow before targeted ZAP execution. Its role is to improve ranking quality for ambiguous route/finding matches, but it must never:
+GraphCodeBERT is loaded through Transformers from the pinned `microsoft/graphcodebert-base` revision and runs locally before targeted ZAP execution. The planner embeds a natural-language finding/route query and the source code in each deterministically mapped ambiguous candidate, then ranks those candidates by cosine similarity. The image preloads the pinned weights so an active DAST run does not download model files.
+
+The pretrained encoder is not fine-tuned for this project's labels. The inference path builds a GraphCodeBERT-style graph-guided attention mask from lexical identifier def/use links; these links are an approximation, not a taint graph. Its cosine score is an uncalibrated similarity, not a vulnerability probability. Keep the model advisory and show `ERROR` when dependencies or inference fail; never substitute a synthetic score. The model must never:
 
 - create a route mapping on its own,
 - confirm a vulnerability,
 - suppress a finding,
 - or bypass the strict correlation gate.
 
-The planner remains deterministic-first. GraphCodeBERT is an advisory ranking layer on top of static evidence, not an authority layer.
+The planner remains deterministic-first. GraphCodeBERT may only break ordering ties among candidates already mapped by source location; it does not create routes or change finding labels.
 
 ### Planner contract
 
@@ -157,7 +159,9 @@ These are additive contracts. The existing finding and correlation schemas remai
 
 ### Time-budgeted ZAP orchestration
 
-The DAST engine should operate in two phases:
+The DAST engine operates in a five-minute ZAP execution window, starting after the selected target is healthy and the route-aware plan is ready. Target startup, Semgrep, route extraction, model loading, and planning are setup time and are reported separately from this DAST window. ZAP startup, route testing, alert collection, and scanner cleanup count against the window.
+
+The engine operates in two phases:
 
 - Phase A: targeted route + rule tests for high-confidence candidates
 - Phase B: broad coverage fallback, only if time remains
@@ -166,7 +170,10 @@ Budget logic:
 - schedule targeted tasks first,
 - stop scheduling new tasks when the scan deadline is reached,
 - record coverage gaps and budget cutoff explicitly in the UI and API,
+- mark the run `INCOMPLETE` when the budget prevents queued work from running; do not present a timeboxed partial scan as full coverage,
 - never let a model score bypass origin or target-boundary checks.
+
+Targeted work is coalesced by route and method so applicable CWE scanner IDs run in one ZAP task. Targeted tasks have a 15-second ceiling and broad fallback tasks have a 5-second ceiling; remaining time goes to the next queued task. The five-minute limit is a hard execution bound, not a guarantee that every route is covered. Coverage counts and cutoff status are part of the result.
 
 ### Required implementation sequence
 
@@ -181,14 +188,16 @@ Budget logic:
    - generate and serialize the plan for inspection
 
 3. Mandatory GraphCodeBERT enrichment
-   - pin the GraphCodeBERT model revision and preprocessing pipeline
-   - build focused function-level context windows and route/finding relevance pairs
-   - run in ranking-only mode and log model status separately from deterministic evidence
+   - load pinned `microsoft/graphcodebert-base` CPU weights from the Docker image cache
+   - build bounded finding/route queries and source windows with a graph-guided attention mask
+   - use lexical identifier def/use edges as an explicitly approximate DFG input
+   - rank only deterministic ambiguous route candidates and log model status/scores separately
 
 4. ZAP orchestration
    - verify selected target profile and local origin boundary
    - execute targeted tasks first
-   - add deadline handling and broad-coverage fallback
+   - enforce a five-minute ZAP window after target readiness and plan generation
+   - retain broad-coverage fallback and mark skipped tasks as incomplete coverage
 
 5. Incremental correlation
    - normalize ZAP alerts as they arrive

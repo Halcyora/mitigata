@@ -48,6 +48,16 @@ claims = jwt.decode(
 # Flask/Jinja example: profile.html must be a static, trusted template.
 return render_template("profile.html", display_name=user_input)
 """,
+    "eval_injection": """\
+# Eval injection — remove dynamic evaluation; parse only the required data format.
+# For numeric expressions, use a dedicated parser with an allowlisted AST grammar.
+value = parse_allowed_expression(user_input)
+""",
+    "insecure_deserialisation": """\
+# Insecure deserialisation — use a data-only format and validate its schema.
+payload = json.loads(data)
+session = SessionSchema.model_validate(payload)
+""",
 }
 
 _CWE_TO_SINK: Final[dict[str, str]] = {
@@ -57,6 +67,8 @@ _CWE_TO_SINK: Final[dict[str, str]] = {
     "CWE-916": "weak_hash",
     "CWE-347": "jwt_weak_secret",
     "CWE-94": "ssti",
+    "CWE-95": "eval_injection",
+    "CWE-502": "insecure_deserialisation",
 }
 
 

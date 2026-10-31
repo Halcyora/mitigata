@@ -12,9 +12,9 @@ class CodeContextAssessment:
     finding_id: str
     candidate_route_id: str
     model_id: str = "microsoft/graphcodebert-base"
-    model_revision: str = "pinned-revision"
-    task_head_version: str = "route-relevance-shadow-v1"
-    preprocessor_version: str = "graphcodebert-dfg-v1"
+    model_revision: str = "9b8660679da59fe3e7423b03efa48d41944eec42"
+    task_head_version: str = "cosine-retrieval-v1"
+    preprocessor_version: str = "lexical-dataflow-graph-mask-v1"
     source_revision: str | None = None
     status: str = "SKIPPED"
     relevance_score: float = 0.0

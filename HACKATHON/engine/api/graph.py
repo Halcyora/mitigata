@@ -45,6 +45,13 @@ class GraphNodeData(BaseModel):
     line: int | None = None
     cwe: str | None = None
     evidence: str | None = None
+    merged_from: list[str] = Field(default_factory=list)
+    reason: str | None = None
+    url: str | None = None
+    method: str | None = None
+    parameter: str | None = None
+    parameter_source: str | None = None
+    http_status: int | None = None
 
 
 class GraphNode(BaseModel):
@@ -326,6 +333,13 @@ def _build_snapshot(target_id: TargetId) -> GraphSnapshot:
                     line=finding.line,
                     cwe=finding.cwe_id,
                     evidence=finding.evidence,
+                    merged_from=finding.merged_from,
+                    reason=finding.reason,
+                    url=finding.url,
+                    method=finding.method,
+                    parameter=finding.parameter,
+                    parameter_source=finding.parameter_source,
+                    http_status=finding.http_status,
                 ),
             )
         )

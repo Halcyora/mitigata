@@ -34,7 +34,7 @@ def correlate_and_merge(
                     continue
                 if not route.matches_path(path):
                     continue
-                if not route.matches_method(dast_finding.method):
+                if dast_finding.method and not route.matches_method(dast_finding.method):
                     continue
                 if not route.contains_location(sast_finding.file, sast_finding.line):
                     continue
@@ -83,6 +83,7 @@ def correlate_and_merge(
                     "evidence": dast_finding.evidence,
                     "http_status": dast_finding.http_status,
                     "merged_from": [sast_finding.id, dast_finding.id],
+                    "reason": "Matched target, CWE, normalized route, code scope, and request parameter/source.",
                     "confidence": 0.95,
                     "routes": [route.normalized_url],
                 }

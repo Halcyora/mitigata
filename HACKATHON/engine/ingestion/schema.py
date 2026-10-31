@@ -33,6 +33,7 @@ class UnifiedFinding(BaseModel):
     reachable: bool | None = None
     routes: list[str] = Field(default_factory=list)
     merged_from: list[str] = Field(default_factory=list)
+    reason: str | None = None
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
 
     model_config = {

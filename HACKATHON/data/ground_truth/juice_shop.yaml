@@ -1,0 +1,18 @@
+target_id: juice_shop
+target_revision: f189f521266f42c6bd05884468292000cee852ed
+kind: checked_in_sample_fixture
+description: >-
+  Expected records for the repository's deterministic offline Semgrep/ZAP samples.
+  This is fixture ground truth and is not a complete Juice Shop vulnerability census.
+findings:
+  - source: sast
+    cwe_id: CWE-327
+    file: app.js
+    line: 10
+    label: Code only
+  - source: dast
+    cwe_id: CWE-UNKNOWN
+    url: http://target-juice-shop:3000/rest/user/login
+    method: POST
+    parameter: email
+    label: Runtime only

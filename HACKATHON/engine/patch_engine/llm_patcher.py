@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Literal
@@ -146,6 +147,77 @@ def validate_unified_diff(patch: str, expected_file: str) -> str | None:
     if not _validate_hunk_counts(hunk_lines):
         return None
     return patch + "\n"
+
+
+def apply_unified_diff(patch: str, file_path: str | os.PathLike[str], expected_file: str) -> None:
+    """Apply a previously validated single-file diff with context checks and atomic replace."""
+    validated = validate_unified_diff(patch, expected_file)
+    if validated is None:
+        raise PatchGenerationError("Patch is invalid or targets a different file")
+    path = os.path.realpath(file_path)
+    with open(path, "rb") as source_file:
+        raw = source_file.read()
+    try:
+        original = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise PatchGenerationError("Source file is not UTF-8 text") from exc
+    lines = original.splitlines(keepends=True)
+    patch_lines = validated.splitlines()
+    output: list[str] = []
+    source_cursor = 0
+    hunk_index = next((i for i, line in enumerate(patch_lines) if line.startswith("@@ ")), -1)
+    if hunk_index < 0:
+        raise PatchGenerationError("Patch does not contain a hunk")
+    index = hunk_index
+    while index < len(patch_lines):
+        header = _HUNK_HEADER.fullmatch(patch_lines[index])
+        if header is None:
+            raise PatchGenerationError("Patch contains a malformed hunk")
+        old_start = int(header.group(1))
+        old_count = int(header.group(2) or 1)
+        hunk_start = old_start if old_count == 0 else old_start - 1
+        if hunk_start < source_cursor or hunk_start > len(lines):
+            raise PatchGenerationError("Patch hunk is outside the current source file")
+        output.extend(lines[source_cursor:hunk_start])
+        source_cursor = hunk_start
+        index += 1
+        while index < len(patch_lines) and not patch_lines[index].startswith("@@ "):
+            line = patch_lines[index]
+            if line.startswith("\\ No newline at end of file"):
+                index += 1
+                continue
+            content = line[1:] + "\n"
+            if line.startswith(" "):
+                if source_cursor >= len(lines) or lines[source_cursor].rstrip("\r\n") != line[1:]:
+                    raise PatchGenerationError("Patch context does not match the current source")
+                output.append(lines[source_cursor])
+                source_cursor += 1
+            elif line.startswith("-"):
+                if source_cursor >= len(lines) or lines[source_cursor].rstrip("\r\n") != line[1:]:
+                    raise PatchGenerationError("Patch removal does not match the current source")
+                source_cursor += 1
+            elif line.startswith("+"):
+                output.append(content)
+            index += 1
+    output.extend(lines[source_cursor:])
+    updated = "".join(output)
+    mode = os.stat(path).st_mode
+    temp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", dir=os.path.dirname(path), delete=False) as handle:
+            temp_path = handle.name
+            handle.write(updated)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp_path, mode)
+        with open(path, "rb") as source_file:
+            unchanged = source_file.read() == raw
+        if not unchanged:
+            raise PatchGenerationError("Source file changed while applying the patch; regenerate it")
+        os.replace(temp_path, path)
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
 
 
 def _configuration() -> tuple[str, str, str] | None:

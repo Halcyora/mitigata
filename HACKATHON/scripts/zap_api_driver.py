@@ -14,8 +14,11 @@ from urllib.request import Request, urlopen
 API_ROOT = "http://127.0.0.1:8090"
 API_WAIT_SECONDS = 60
 API_TIMEOUT_SECONDS = 10
+TASK_TIMEOUT_SECONDS = 30
+TARGETED_TASK_TIMEOUT_SECONDS = 15
+BROAD_TASK_TIMEOUT_SECONDS = 5
 POLL_INTERVAL_SECONDS = 2
-FINALIZATION_RESERVE_SECONDS = 10
+FINALIZATION_RESERVE_SECONDS = 15
 _FLASK_PATH_PARAMETER = re.compile(r"<(?:[A-Za-z_][A-Za-z0-9_]*:)?([A-Za-z_][A-Za-z0-9_]*)>")
 _EXPRESS_PATH_PARAMETER = re.compile(r":([A-Za-z_][A-Za-z0-9_]*)")
 
@@ -29,18 +32,28 @@ class ZapApiError(RuntimeError):
     pass
 
 
+class ZapDeadlineError(ZapApiError):
+    pass
+
+
 class ZapClient:
-    def __init__(self, api_key: str) -> None:
+    def __init__(self, api_key: str, deadline: float | None = None) -> None:
         self.api_key = api_key
+        self.deadline = deadline or (time.monotonic() + API_WAIT_SECONDS + 300)
 
     def request(self, component: str, operation: str, name: str, **params: str) -> dict[str, Any]:
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise ZapDeadlineError("DAST budget exhausted")
         query = urlencode({"apikey": self.api_key, **params})
         url = f"{API_ROOT}/JSON/{component}/{operation}/{name}/?{query}"
         request = Request(url, headers={"Accept": "application/json"})
         try:
-            with urlopen(request, timeout=API_TIMEOUT_SECONDS) as response:
+            with urlopen(request, timeout=min(API_TIMEOUT_SECONDS, remaining)) as response:
                 payload = json.load(response)
         except (HTTPError, URLError, TimeoutError) as exc:
+            if time.monotonic() >= self.deadline:
+                raise ZapDeadlineError("DAST budget exhausted during a ZAP API call") from exc
             detail = exc.read().decode("utf-8", errors="replace") if isinstance(exc, HTTPError) else str(exc)
             raise ZapApiError(f"ZAP {component}/{operation}/{name} failed: {detail[:1000]}") from exc
         if not isinstance(payload, dict) or "code" in payload:
@@ -48,13 +61,17 @@ class ZapClient:
         return payload
 
     def wait_ready(self) -> None:
-        deadline = time.monotonic() + API_WAIT_SECONDS
+        deadline = min(self.deadline, time.monotonic() + API_WAIT_SECONDS)
         while time.monotonic() < deadline:
             try:
                 self.request("core", "view", "version")
                 return
+            except ZapDeadlineError:
+                raise
             except (ZapApiError, OSError):
-                time.sleep(1)
+                time.sleep(min(1, max(0.05, deadline - time.monotonic())))
+        if time.monotonic() >= self.deadline:
+            raise ZapDeadlineError("DAST budget exhausted while waiting for ZAP startup")
         raise ZapApiError("ZAP API did not become ready before the startup timeout")
 
 
@@ -150,6 +167,26 @@ def _request_data(task: dict[str, Any]) -> tuple[str, str | None, str | None]:
     ]
     post_data = urlencode(form_values) if form_values else None
     return final_url, method, post_data
+
+
+def _raw_seed_request(url: str, method: str, post_data: str | None) -> str:
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    if parts.port is not None:
+        host = f"{host}:{parts.port}"
+    path = parts.path or "/"
+    if parts.query:
+        path = f"{path}?{parts.query}"
+    body = post_data or ""
+    headers = [
+        f"{method} {path} HTTP/1.1",
+        f"Host: {host}",
+        "Connection: close",
+    ]
+    if post_data is not None:
+        headers.append("Content-Type: application/x-www-form-urlencoded")
+    headers.append(f"Content-Length: {len(body.encode('utf-8'))}")
+    return "\r\n".join([*headers, "", body])
 
 
 def _ensure_origin(url: str, expected: tuple[str, str, int]) -> None:
@@ -267,6 +304,13 @@ def _run_task(
     now = datetime.now(timezone.utc).isoformat()
     task["started_at"] = now
     task["status"] = "RUNNING"
+    task_timeout = (
+        TARGETED_TASK_TIMEOUT_SECONDS
+        if task["phase"] == "TARGETED"
+        else BROAD_TASK_TIMEOUT_SECONDS
+    )
+    task_timeout = min(task_timeout, TASK_TIMEOUT_SECONDS)
+    task_deadline = min(deadline, time.monotonic() + task_timeout)
     task_url = _task_url(target_url, str(task["raw_url"]))
     task_url, method, post_data = _request_data({**task, "url": task_url})
     _ensure_origin(task_url, expected_origin)
@@ -278,30 +322,14 @@ def _run_task(
         url=task_url,
         followRedirects="false",
     )
-    spider = client.request(
-        "spider",
-        "action",
-        "scan",
-        url=task_url,
-        maxChildren="1",
-        contextName=context_name,
-        subtreeOnly="true",
-    )
-    spider_id = _api_result(spider, "scan")
-    while time.monotonic() < deadline:
-        spider_status = client.request(
-            "spider", "view", "status", scanId=spider_id
+    if method and method != "GET":
+        client.request(
+            "core",
+            "action",
+            "sendRequest",
+            request=_raw_seed_request(task_url, method, post_data),
+            followRedirects="false",
         )
-        if int(_api_result(spider_status, "status")) >= 100:
-            break
-        time.sleep(min(POLL_INTERVAL_SECONDS, max(0.1, deadline - time.monotonic())))
-    else:
-        client.request("spider", "action", "stop", scanId=spider_id)
-        task["status"] = "TIMED_OUT"
-        task["error"] = "Scan budget cutoff reached during route discovery"
-        task["finished_at"] = datetime.now(timezone.utc).isoformat()
-        return
-
     params = {
         "url": task_url,
         "recurse": "false",
@@ -314,17 +342,21 @@ def _run_task(
     response = client.request("ascan", "action", "scan", **params)
     scan_id = _api_result(response, "scan")
 
-    while time.monotonic() < deadline:
+    while time.monotonic() < task_deadline:
         progress = client.request("ascan", "view", "scanProgress", scanId=scan_id)
         if _scan_progress_complete(progress):
             task["progress"] = 100
             task["status"] = "COMPLETED"
             break
-        time.sleep(min(POLL_INTERVAL_SECONDS, max(0.1, deadline - time.monotonic())))
+        time.sleep(min(POLL_INTERVAL_SECONDS, max(0.1, task_deadline - time.monotonic())))
     else:
         client.request("ascan", "action", "stop", scanId=scan_id)
         task["status"] = "TIMED_OUT"
-        task["error"] = "Scan budget cutoff reached"
+        task["error"] = (
+            "Scan budget cutoff reached"
+            if time.monotonic() >= deadline
+            else "Task timeout reached"
+        )
     task["finished_at"] = datetime.now(timezone.utc).isoformat()
 
 
@@ -338,7 +370,7 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
     scheme, host, port = _validate_origin(target_id, target_url)
     expected_origin = (scheme, host, port)
     deadline_at = datetime.fromisoformat(str(plan["deadline_at"]))
-    budget = max(1.0, (deadline_at - datetime.now(timezone.utc)).total_seconds())
+    budget = max(0.0, (deadline_at - datetime.now(timezone.utc)).total_seconds())
     deadline = time.monotonic() + max(0.0, budget - FINALIZATION_RESERVE_SECONDS)
     targeted = plan.get("targeted_tasks", [])
     broad = plan.get("broad_tasks", [])
@@ -346,42 +378,52 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(tasks, list) or not all(isinstance(task, dict) for task in tasks):
         raise ValueError("Scan plan task lists must contain objects")
 
-    client = ZapClient(api_key)
-    client.wait_ready()
-    context_name = f"mitigata-{str(plan['scan_id'])[:24]}"
-    context = client.request("context", "action", "newContext", contextName=context_name)
-    context_id = _api_result(context, "contextId")
-    scope_regex = rf"^{re.escape(scheme)}://{re.escape(host)}:{port}(?:/.*)?$"
-    client.request(
-        "context",
-        "action",
-        "includeInContext",
-        contextName=context_name,
-        regex=scope_regex,
-    )
-    client.request(
-        "context",
-        "action",
-        "setContextInScope",
-        contextName=context_name,
-        booleanInScope="true",
-    )
-    scanner_result = client.request("ascan", "view", "scanners")
-    scanner_list = scanner_result.get("scanners", [])
-    if not isinstance(scanner_list, list):
-        raise ZapApiError("ZAP scanner inventory was not a list")
-    available_scanners = {
-        str(scanner["id"])
-        for scanner in scanner_list
-        if isinstance(scanner, dict)
-        and scanner.get("allDependenciesAvailable") == "true"
-    }
-
     started_at = datetime.now(timezone.utc).isoformat()
     plan["status"] = "RUNNING"
     alerts_by_key: dict[tuple[str, ...], dict[str, Any]] = {}
     cutoff = False
-    for phase_tasks in (targeted, broad):
+    client = ZapClient(api_key)
+    if hasattr(client, "deadline"):
+        client.deadline = deadline
+    try:
+        client.wait_ready()
+        context_name = f"mitigata-{str(plan['scan_id'])[:24]}"
+        context = client.request("context", "action", "newContext", contextName=context_name)
+        context_id = _api_result(context, "contextId")
+        scope_regex = rf"^{re.escape(scheme)}://{re.escape(host)}:{port}(?:/.*)?$"
+        client.request(
+            "context",
+            "action",
+            "includeInContext",
+            contextName=context_name,
+            regex=scope_regex,
+        )
+        client.request(
+            "context",
+            "action",
+            "setContextInScope",
+            contextName=context_name,
+            booleanInScope="true",
+        )
+        scanner_result = client.request("ascan", "view", "scanners")
+        scanner_list = scanner_result.get("scanners", [])
+        if not isinstance(scanner_list, list):
+            raise ZapApiError("ZAP scanner inventory was not a list")
+        available_scanners = {
+            str(scanner["id"])
+            for scanner in scanner_list
+            if isinstance(scanner, dict)
+            and scanner.get("allDependenciesAvailable") == "true"
+        }
+    except ZapDeadlineError:
+        cutoff = True
+        context_id = ""
+        context_name = ""
+        available_scanners = set()
+        for task in tasks:
+            task["status"] = "SKIPPED_BUDGET"
+
+    for phase_tasks in (() if cutoff else (targeted, broad)):
         for task in phase_tasks:
             if time.monotonic() >= deadline:
                 task["status"] = "SKIPPED_BUDGET"
@@ -412,9 +454,12 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
                 task["status"] = "FAILED"
                 task["error"] = str(exc)[:1000]
                 task["finished_at"] = datetime.now(timezone.utc).isoformat()
-            for alert in _get_alerts(client, target_url):
-                alerts_by_key[_alert_key(alert)] = alert
-            if task["status"] == "TIMED_OUT":
+            try:
+                for alert in _get_alerts(client, target_url):
+                    alerts_by_key[_alert_key(alert)] = alert
+            except ZapDeadlineError:
+                cutoff = True
+            if task["status"] == "TIMED_OUT" and time.monotonic() >= deadline:
                 cutoff = True
                 break
         if cutoff:

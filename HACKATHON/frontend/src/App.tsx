@@ -1,8 +1,11 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
-import { fetchGraph, graphQueryKey } from "./api";
+import { applyPatch, fetchGraph, graphQueryKey, requestPatch } from "./api";
 import { CorrelationGraph } from "./components/CorrelationGraph";
+import { BusinessRiskPanel } from "./components/BusinessRiskPanel";
+import { PlannerPanel } from "./components/PlannerPanel";
+import { ReTestButton } from "./components/ReTestButton";
 import { useVerification } from "./hooks/useVerification";
 import type { GraphNode, TargetId } from "./types";
 
@@ -22,11 +25,17 @@ function FindingDetail({
   finding,
   verifyState,
   onVerify,
+  targetId,
 }: {
   finding: GraphNode | undefined;
   verifyState: ReturnType<typeof useVerification>;
   onVerify: () => void;
+  targetId: TargetId;
 }) {
+  const [patchState, setPatchState] = useState<{ patch: string; source: string; kind: string } | null>(null);
+  const [patchError, setPatchError] = useState<string | null>(null);
+  const [patchApplied, setPatchApplied] = useState(false);
+  const [patchBusy, setPatchBusy] = useState(false);
   if (!finding) {
     return (
       <aside className="detail-panel detail-empty">
@@ -70,28 +79,27 @@ function FindingDetail({
           </div>
         )}
       </section>
+      {data.merged_from && data.merged_from.length > 0 && (
+        <section className="detail-section"><h3>Correlation explanation</h3><p>{data.reason ?? "Code and runtime evidence were correlated."}</p><ul>{data.merged_from.map((id) => <li key={id}><code>{id}</code></li>)}</ul></section>
+      )}
+      {data.file && data.line && data.finding_id && (
+        <section className="detail-section"><h3>Remediation</h3><button className="verify-button" type="button" disabled={patchBusy} onClick={async () => { setPatchBusy(true); setPatchError(null); setPatchApplied(false); try { const result = await requestPatch(data.finding_id!, targetId); setPatchState({ patch: result.patch, source: result.source, kind: result.kind }); } catch (error) { setPatchError(error instanceof Error ? error.message : "Patch generation failed"); } finally { setPatchBusy(false); } }}>{patchBusy ? "Generating..." : "Generate fix suggestion"}</button>{patchError && <p className="error-copy">{patchError}</p>}{patchApplied && <p className="muted-copy">Patch applied. Runtime verification was restarted.</p>}{patchState && <><p className="muted-copy">{patchState.source} · {patchState.kind === "unified_diff" ? "validated diff" : "snippet preview"}</p><pre className="evidence-block">{patchState.patch}</pre>{patchState.kind === "unified_diff" && <button className="verify-button" type="button" disabled={patchBusy} onClick={async () => { setPatchBusy(true); setPatchError(null); try { await applyPatch(data.finding_id!, targetId, patchState.patch); setPatchApplied(true); onVerify(); } catch (error) { setPatchError(error instanceof Error ? error.message : "Patch apply failed"); } finally { setPatchBusy(false); } }}>Apply diff and re-test</button>}</>}</section>
+      )}
       <section className="detail-section">
-        <h3>Evidence</h3>
+        <h3>HTTP trace</h3>
+        <div className="http-trace">
+          <strong>{data.method ?? "HTTP"} {data.url ?? "No runtime URL recorded"}</strong>
+          {data.parameter && <span>Input: <code>{data.parameter}</code> ({data.parameter_source ?? "source unknown"})</span>}
+          {data.http_status != null && <span>Response status: {data.http_status}</span>}
+        </div>
+        <h3 className="evidence-title">Runtime evidence</h3>
         <pre className="evidence-block">
           {data.evidence || "No runtime evidence has been recorded."}
         </pre>
       </section>
       {canVerify && (
         <section className="verify-section">
-          <button
-            className="verify-button"
-            type="button"
-            onClick={onVerify}
-            disabled={verifyState.status === "running"}
-          >
-            {verifyState.status === "running" ? (
-              <>
-                <span className="spinner" /> Verifying...
-              </>
-            ) : (
-              "Verify at runtime"
-            )}
-          </button>
+          <ReTestButton onClick={onVerify} busy={verifyState.status === "running"} />
           {verifyState.label && (
             <p className="live-label">
               Live result{" "}
@@ -259,9 +267,11 @@ export default function App() {
             finding={selectedFinding}
             verifyState={verification}
             onVerify={verification.verify}
+            targetId={targetId}
           />
         </section>
       ) : null}
+      {graphQuery.data && <section className="supplemental-panels"><BusinessRiskPanel targetId={targetId} /><PlannerPanel targetId={targetId} /></section>}
     </main>
   );
 }
