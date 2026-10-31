@@ -89,8 +89,8 @@ class PythonASTIndexer:
             try:
                 source_code = py_file.read_text(encoding="utf-8", errors="replace")
                 tree = ast.parse(source_code, filename=rel_path)
-            except SyntaxError:
-                continue
+            except SyntaxError as exc:
+                raise ValueError(f"Unable to parse Python source {rel_path}: {exc}") from exc
 
             file_ctx = FileASTContext(rel_path=rel_path, module_name=mod_name, tree=tree)
             self._extract_imports_and_functions(tree, file_ctx)

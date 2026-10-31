@@ -108,7 +108,8 @@ def test_static_multiple_mounts_are_preserved_and_dynamic_mount_is_unresolved(
         "from routes import bp\n"
         "app = Flask(__name__)\n"
         "app.register_blueprint(bp, url_prefix='/api')\n"
-        "app.register_blueprint(bp, url_prefix='/v2')\n",
+        "app.register_blueprint(bp, url_prefix='/v2')\n"
+        "app.register_blueprint(bp, url_prefix=dynamic_prefix)\n",
         encoding="utf-8",
     )
 
@@ -116,8 +117,9 @@ def test_static_multiple_mounts_are_preserved_and_dynamic_mount_is_unresolved(
         TargetProfile("flask_demo", "python", "flask", tmp_path)
     )
     assert {
-        route.normalized_url for route in graph["routes"]
+        route.normalized_url for route in graph["routes"] if route.resolved
     } == {"/api/users/{param}", "/v2/users/{param}"}
+    assert any(not route.resolved for route in graph["routes"])
 
 
 def test_dynamic_express_mount_never_becomes_a_strict_route_match(tmp_path: Path):
@@ -185,13 +187,19 @@ def test_reachability_and_correlation_require_exact_target_route_scope_and_input
     missing_method = good_dast.model_copy(
         update={"id": "dast-missing-method", "method": None}
     )
+    missing_source = good_dast.model_copy(
+        update={"id": "dast-missing-source", "parameter_source": None}
+    )
 
     merged = correlate_and_merge(
-        [sast], [wrong_target, wrong_parameter, missing_method, good_dast], [route]
+        [sast],
+        [wrong_target, wrong_parameter, missing_method, missing_source, good_dast],
+        [route],
     )
     assert merged[0].label == "Confirmed"
     assert merged[0].merged_from == ["sast", "dast-good"]
     assert [finding.label for finding in merged[1:]] == [
+        "Runtime only",
         "Runtime only",
         "Runtime only",
         "Runtime only",

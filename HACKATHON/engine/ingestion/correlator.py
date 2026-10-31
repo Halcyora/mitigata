@@ -38,12 +38,14 @@ def correlate_and_merge(
                     continue
                 if not route.contains_location(sast_finding.file, sast_finding.line):
                     continue
+                if (
+                    not dast_finding.parameter
+                    or not dast_finding.parameter_source
+                ):
+                    continue
                 if not any(
                     read.name == dast_finding.parameter
-                    and (
-                        dast_finding.parameter_source is None
-                        or read.source == dast_finding.parameter_source
-                    )
+                    and read.source == dast_finding.parameter_source
                     for read in route.input_parameters
                 ):
                     continue

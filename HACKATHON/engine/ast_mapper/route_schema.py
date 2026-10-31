@@ -23,8 +23,9 @@ class CodeScope(BaseModel):
     def require_target_relative_file(cls, value: str) -> str:
         normalized = value.replace("\\", "/")
         if (
-            normalized.startswith("/")
-            or re.match(r"^[A-Za-z]:/", normalized)
+            not normalized
+            or normalized.startswith("/")
+            or re.match(r"^[A-Za-z]:", normalized)
             or ".." in PurePosixPath(normalized).parts
         ):
             raise ValueError("Code scope file must be target-relative")
