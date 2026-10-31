@@ -57,7 +57,7 @@ This incident exemplifies exactly what Problem 06 solves:
 | What Went Wrong | How This Engine Prevents It |
 |---|---|
 | SAST tools flagged the vulnerability class but it was buried in noise | 3-tier classification surfaces **Confirmed** findings first |
-| DAST scans were not correlated with source code | AST route-to-sink mapper links runtime proof to exact code line |
+| DAST scans were not correlated with source code | Three-pass AST route mapping checks normalized route, code scope, and observed input parameter |
 | Duplicate alerts from multiple tools created confusion | Correlation engine merges duplicates — each real vulnerability appears **once** |
 | Security team could not prioritise 1,000+ alerts | Confirmed tier = immediate action; Code-only = review; Runtime-only = investigate |
 | No business context attached to technical findings | INR financial exposure and RBI/SEBI compliance mapping per finding |
@@ -97,17 +97,74 @@ These three objectives are **what judges score**. All three must be demonstrated
 
 The correlation engine must:
 
-1. **Link** each DAST runtime finding to the exact source file and line number via deterministic AST analysis
+1. **Link** a DAST runtime finding to a SAST location only when deterministic AST evidence agrees on normalized route, route code scope, and the attacked input parameter
 2. **Merge** duplicate findings (same vulnerability reported by both SAST and DAST) into a single record
 3. **Deduplicate** — each real vulnerability appears **exactly once** in the output
-4. **Prove** the linkage mathematically (call graph traversal), not via LLM guessing
+4. **Require** CWE agreement as well as route, scope, parameter, and HTTP method agreement when the method is known
+5. **Prove** the linkage deterministically, not via LLM guessing; a CWE-only or line-range-only match is not sufficient
+
+**Example:** a Flask Blueprint mounted at `/api` declares
+`@bp.route("/orders/<int:id>")`. The route normalizes to
+`/api/orders/{param}`. If the handler reads query key `q` and directly calls an
+imported helper in `db.py`, the route node contains that parameter read and both
+handler/helper source scopes. A ZAP finding for `/api/orders/42?q=test` can
+correlate with a SAST finding at the helper only if the CWE and method also
+match. An attack on another parameter, another route, or a SAST line outside
+those scopes stays unlinked.
+
+```mermaid
+flowchart LR
+    ZAP["ZAP alert\nGET /api/orders/42?q=test\nCWE-89 · parameter q"]
+    NORMAL["Normalize runtime path\n/api/orders/{param}"]
+    ROUTE["RouteNode\nFlask prefix + route\n/api/orders/{param}"]
+    SCOPE["Pass 2 scope\norders.py handler\n+ direct db.py helper"]
+    PARAM["Pass 3 input reads\nid: path\nq: query"]
+    SAST["Semgrep finding\nCWE-89 · db.py:55"]
+    CHECK{"CWE + path + method\n+ SAST location in scope\n+ attacked parameter read?"}
+    CONFIRMED["Confirmed\none finding with code + runtime evidence"]
+    NO_MATCH["No merge\nfindings retain Code only / Runtime only labels"]
+
+    ZAP --> NORMAL --> CHECK
+    ROUTE --> CHECK
+    SCOPE --> CHECK
+    PARAM --> CHECK
+    SAST --> CHECK
+    CHECK -->|All checks pass| CONFIRMED
+    CHECK -->|Any check fails| NO_MATCH
+```
+
+**Correlation gate:** CWE, normalized path, method (when available), source
+scope, and attacked parameter are conjunctive evidence. `CodeScope` matches an
+exact file and inclusive start/end line span; it is not a heuristic substring
+match. `ParameterRead` preserves both the input name and source kind (`path`,
+`query`, `form`, `json`, or `header`). Dynamic/unknown parameter names do not
+act as wildcards.
 
 **Merge logic:**
 
-```
-SAST Finding (CWE-89, app.py:47)  ──┐
-                                     ├──► MERGED: Single finding with code + runtime proof
-DAST Finding (CWE-89, POST /login) ──┘
+```mermaid
+flowchart TD
+    SAST["SAST findings"]
+    DAST["DAST findings"]
+    ROUTES["Three-pass RouteNode index"]
+    CANDIDATE{"For each SAST/DAST candidate:\nCWE matches?"}
+    GATE{"Normalized route + method\n+ scope + parameter match?"}
+    MERGE["Merge pair\nConfirmed\nmerged_from contains both IDs"]
+    SAST_ONLY["Emit SAST as Code only"]
+    LEFT["Filter DAST IDs not consumed by a merge"]
+    DAST_ONLY["Emit remaining DAST as Runtime only"]
+    SORT["Sort Confirmed first,\nthen Code only, then Runtime only"]
+
+    SAST --> CANDIDATE
+    DAST --> CANDIDATE
+    ROUTES --> GATE
+    CANDIDATE -->|Yes| GATE
+    CANDIDATE -->|No candidate| SAST_ONLY --> SORT
+    GATE -->|Yes| MERGE --> LEFT
+    GATE -->|No| SAST_ONLY
+    DAST --> LEFT
+    LEFT --> DAST_ONLY --> SORT
+    MERGE --> SORT
 ```
 
 ---
@@ -119,8 +176,8 @@ DAST Finding (CWE-89, POST /login) ──┘
 | Label | Definition | Priority |
 |---|---|---|
 | **Confirmed** | Both SAST code evidence AND DAST runtime proof present | 🔴 Rank 1 — Fix immediately |
-| **Code only** | SAST found it in source code; DAST could not reach/trigger it | 🟡 Rank 2 — Review, may be dead code |
-| **Runtime only** | DAST found it at runtime; no corresponding code sink found | 🟠 Rank 3 — Investigate configuration |
+| **Code only** | SAST finding did not pass the strict SAST/DAST correlation gate; AST reachability is retained separately | 🟡 Rank 2 — Review, may be dead code or lack matching runtime evidence |
+| **Runtime only** | DAST finding was not consumed by a confirmed SAST/DAST pair | 🟠 Rank 3 — Investigate configuration or locate code |
 
 > **Confirmed issues must always appear first** in every view, export, and API response.
 
@@ -166,25 +223,32 @@ All components below are **required**. Omitting any one risks disqualification f
 
 ---
 
-### 5.2 Deterministic AST Route-to-Sink Mapper
+### 5.2 Three-Pass Deterministic AST Route Mapper
 
-**What it does:** Uses Python `ast` or `tree-sitter` to build a **call graph** that traces execution from an HTTP route decorator down to a vulnerable code sink — enabling the linkage required by Objective 02.
+**What it does:** Uses Python `ast` to create a unified route node and deterministic route evidence in three passes. The v1 implementation targets Flask/Python. Keep framework-specific route extraction behind adapters; Express `app.use()` mounting and JavaScript `:id` route parsing are future work, not a current capability.
 
-**Example trace:**
+**Three passes:**
 
-```
-@app.post("/login")           ← HTTP Route (entry point)
-  └─► authenticate_user()     ← Controller function
-        └─► db.execute(query)  ← Vulnerable sink (raw SQL, line 47)
-```
+| Pass | Responsibility | Route node output |
+|---|---|---|
+| 1 — Route and prefix mapping | Extract Flask route decorators/methods, resolve statically known `register_blueprint(..., url_prefix=...)` mounts, join prefix and route, normalize dynamic path segments | Original path, normalized URL, methods, handler |
+| 2 — One-hop callee scopes | Resolve directly called local or imported project helpers from the handler; record exact function spans | Handler and direct-callee `CodeScope[]` |
+| 3 — Request parameter extraction | Inspect handler and one-hop helper ASTs for statically named request reads | `ParameterRead[]` with name and source kind |
 
 **Requirements:**
 
-- Parse route decorators: `@app.get(...)`, `@app.post(...)`, `@router.route(...)`, FastAPI `@router.*`, Flask `@app.route(...)`
-- Traverse function call chains across multiple files
-- Identify sink patterns: raw SQL execution, `eval()`, `subprocess`, `os.system`, unsafe deserialization, template injection points, XSS output sinks
-- Output a structured call graph (nodes + edges) in a serialisable format (JSON/GraphML)
-- Cross-reference sink type with CWE number for correlation join
+- Parse Flask route decorators and statically resolvable Blueprint registrations.
+- Normalize typed dynamic segments (for example `<int:id>`) to a shared `{param}` URL template while preserving parameter name/source metadata.
+- Resolve only direct helper calls in v1; do not imply transitive reachability for a helper's callees.
+- Identify configured sink patterns and map sink locations to exact route code scopes.
+- Recognize statically named Flask request reads such as `request.args["q"]`, `request.args.get("q")`, `request.form`, JSON body keys, headers, and path arguments.
+- Output serializable `RouteNode`, `CodeScope`, and `ParameterRead` records for correlation.
+- Keep unresolved dynamic mounts/imports/request keys explicit and ineligible for broad matching.
+
+**Expected example:** `/api/orders/42?q=test` normalizes to
+`/api/orders/{param}`; a route reading `q` and calling a direct helper includes
+that helper's source span, allowing a `db.py:55` finding to be considered by
+the correlation gate.
 
 > ⚠️ **Critical Constraint:** The route-to-sink mapping must be **deterministic** — no LLM guessing. Mathematical linkage must be established *before* any AI layer is invoked. This is the core of Objective 02.
 
@@ -192,18 +256,43 @@ All components below are **required**. Omitting any one risks disqualification f
 
 ### 5.3 Correlation and Merge Engine
 
-**What it does:** The heart of Objective 02. Joins SAST and DAST findings on shared keys, merges duplicates into single records, and assigns the Confirmed / Code only / Runtime only label.
+**What it does:** The heart of Objective 02. Joins SAST and DAST findings only when all required evidence agrees, merges confirmed pairs into one record, and retains unmatched findings as Code only or Runtime only.
 
-**Merge algorithm:**
+**Strict merge gate:**
 
+```mermaid
+flowchart TD
+    S["SAST finding\nCWE + file + line"]
+    D["DAST finding\nCWE + URL + method + parameter"]
+    R["RouteNode index\nnormalized URL + methods\ncode scopes + observed input parameters"]
+    CWE{"CWE IDs equal?"}
+    ROUTE{"Normalized DAST path matches route?\nMethod matches when known?"}
+    SCOPE{"SAST file:line is within\nhandler or one-hop helper scope?"}
+    PARAM{"Attacked DAST parameter is\nread by this route?"}
+    YES["All checks pass\nMerge once as Confirmed"]
+    NO["Any check fails\nDo not link this pair"]
+
+    S --> CWE
+    D --> CWE
+    R --> ROUTE
+    CWE -->|Yes| ROUTE
+    CWE -->|No| NO
+    ROUTE -->|Yes| SCOPE
+    ROUTE -->|No| NO
+    S --> SCOPE
+    SCOPE -->|Yes| PARAM
+    SCOPE -->|No| NO
+    D --> PARAM
+    PARAM -->|Yes| YES
+    PARAM -->|No| NO
 ```
-Step 1: Primary join key  → CWE ID (same vulnerability class)
-Step 2: Secondary key     → DAST URL path matches SAST finding's reachable routes
-Step 3: If both match     → MERGE into single "Confirmed" finding
-Step 4: SAST only         → "Code only" (may be dead code — AST reachability check)
-Step 5: DAST only         → "Runtime only" (config issue or code not found)
-Step 6: Deduplicate       → Each vulnerability appears exactly once
-```
+
+Correlation uses the exact DAST URL path, route template, known HTTP method,
+SAST location, attacked parameter name, and CWE. A CWE match alone is never
+sufficient. A DAST finding can be consumed by at most one merged pair. When no
+pair passes the gate, preserve SAST as Code only and unconsumed DAST as Runtime
+only; the AST reachability result remains separate metadata and does not
+manufacture a DAST match.
 
 **Output per merged finding:**
 - `label`: `"Confirmed"` | `"Code only"` | `"Runtime only"`
@@ -253,13 +342,13 @@ Every finding must be automatically classified and **ranked** by priority:
 
 | Rank | Label | Criteria | Action |
 |---|---|---|---|
-| **1** | 🔴 **Confirmed** | SAST code evidence + DAST runtime proof both present; CWE and route both match | Immediate remediation + auto-patch |
-| **2** | 🟡 **Code only** | Sink exists in source code; DAST could not reach or trigger it | Review — may be dead code (suppress if unreachable via any route) |
-| **3** | 🟠 **Runtime only** | DAST found issue at runtime; no matching code sink identified | Investigate — likely misconfiguration (missing headers, CORS, TLS) |
+| **1** | 🔴 **Confirmed** | SAST code evidence + DAST runtime proof both present; CWE, normalized route, known method, code scope, and attacked parameter match | Immediate remediation + auto-patch |
+| **2** | 🟡 **Code only** | SAST finding did not match a DAST finding through the strict correlation gate; AST reachability is separate metadata | Review — may be unreachable or lack matching runtime evidence |
+| **3** | 🟠 **Runtime only** | DAST finding was not consumed by a confirmed pair | Investigate — likely configuration issue or code not mapped |
 
 > **Confirmed findings must always rank first** — in the UI, in API responses, in exports.
 
-> **Target:** Engine must suppress ≥ 70% of raw SAST alerts as **Code only / unreachable** in the demo repository.
+> **Target:** Engine must classify ≥ 70% of raw SAST alerts as **Code only / unreachable** in the demo repository; preserve the distinction between reachability and a strict SAST/DAST match.
 
 ---
 
@@ -404,8 +493,8 @@ The demo repository must contain:
 
 | Score Band | Description |
 |---|---|
-| **29–30 pts** | Deterministic AST call graph with CWE cross-referencing; each vulnerability appears exactly once; route-to-sink mathematical linkage; zero hallucinated correlations |
-| **20–28 pts** | Partial AST mapping with some LLM-assisted guessing; minor false correlations or duplicate findings |
+| **29–30 pts** | Deterministic three-pass route mapping with CWE, normalized route, code-scope, and parameter checks; each vulnerability appears exactly once; zero guessed correlations |
+| **20–28 pts** | Partial AST mapping or incomplete evidence gates; minor false correlations or duplicate findings |
 | **10–19 pts** | Fuzzy string matching or pure LLM correlation without AST; duplicates present |
 | **0–9 pts** | No correlation mechanism; separate tool outputs with no merge |
 
@@ -430,7 +519,7 @@ The demo repository must contain:
 
 | Score Band | Description |
 |---|---|
-| **19–20 pts** | ≥ 70% of raw SAST alerts suppressed as Code only/unreachable; one-click patch applied; re-verification probe confirms fix; Git diff shown |
+| **19–20 pts** | ≥ 70% of raw SAST alerts classified as Code only/unreachable; one-click patch applied; re-verification probe confirms fix; Git diff shown |
 | **13–18 pts** | Partial noise reduction (< 70%); patch generated but re-verification missing |
 | **6–12 pts** | Text-only remediation advice; no automated patching |
 | **0–5 pts** | No noise reduction or remediation |
@@ -477,44 +566,32 @@ All steps visible and functional in a single live demo flow.
 
 ## 9. 3-Label Prioritised Classification System
 
-```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│              PROBLEM 06 CLASSIFICATION ENGINE                                │
-│                                                                              │
-│  Raw SAST Findings (100%)    Raw DAST Findings (100%)                        │
-│         │                              │                                     │
-│         └──────────────┬───────────────┘                                     │
-│                        ▼                                                     │
-│              ┌──────────────────┐                                            │
-│              │  Correlation &   │  ← CWE join + route URL match              │
-│              │  Merge Engine    │  ← Deduplication                           │
-│              └────────┬─────────┘                                            │
-│                       │                                                      │
-│         ┌─────────────┼──────────────────┐                                   │
-│         │             │                  │                                   │
-│    Both match    SAST only          DAST only                                │
-│         │             │                  │                                   │
-│         ▼             ▼                  ▼                                   │
-│  ┌─────────────┐  ┌──────────────┐  ┌──────────────┐                        │
-│  │ AST Check   │  │ AST Check    │  │ Config Check │                        │
-│  │ Reachable?  │  │ Reachable?   │  │              │                        │
-│  └──────┬──────┘  └──────┬───────┘  └──────┬───────┘                        │
-│         │                │                  │                                │
-│         ▼                ▼                  ▼                                │
-│  ┌─────────────┐  ┌──────────────┐  ┌──────────────┐                        │
-│  │  LangGraph  │  │  Reachable?  │  │ Runtime Only │                        │
-│  │  Probe Loop │  │  Yes → T2    │  │ (Config)     │                        │
-│  └──────┬──────┘  │  No  → Dead  │  └──────────────┘                        │
-│         │         │  Code (supp) │         │                                │
-│    ┌────┴────┐    └──────────────┘         │                                │
-│    │         │                             │                                │
-│ Evidence  Blocked                          │                                │
-│    │         │                             │                                │
-│    ▼         ▼                             ▼                                │
-│ 🔴 CONFIRMED  🟡 CODE ONLY            🟠 RUNTIME ONLY                       │
-│  (Rank 1)     (Rank 2)                  (Rank 3)                            │
-│  Fix Now      Review/Suppress           Investigate                         │
-└──────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    SAST["SAST findings"]
+    DAST["DAST findings"]
+    ROUTES["Three-pass AST route index"]
+    GATE{"CWE + normalized route + known method\n+ SAST code scope + attacked parameter"}
+    CONFIRMED["Confirmed\nRank 1\nAll evidence linked"]
+    CODE["Code only\nRank 2\nSAST unmatched; retain AST reachability"]
+    REMAINING["Unconsumed DAST IDs"]
+    RUNTIME["Runtime only\nRank 3"]
+    PROBE{"Optional live verification\nfor eligible Code only finding"}
+    VERIFIED["Probe evidence found\nupgrade to Confirmed with probe evidence"]
+    SORT["Prioritised output\nConfirmed → Code only → Runtime only"]
+
+    SAST --> GATE
+    DAST --> GATE
+    ROUTES --> GATE
+    GATE -->|All checks pass| CONFIRMED
+    GATE -->|Any check fails| CODE
+    CODE --> PROBE
+    PROBE -->|Verified| VERIFIED --> SORT
+    PROBE -->|Not verified or not needed| SORT
+    CODE --> SORT
+    DAST --> REMAINING
+    CONFIRMED --> REMAINING
+    REMAINING --> RUNTIME --> SORT
 ```
 
 ---
@@ -708,7 +785,7 @@ A submission is considered complete when **all** of the following are true:
 ### Objective 02 — Correlate and Merge
 - [ ] AST call graph built deterministically from source code
 - [ ] Every HTTP route mapped to its downstream sinks
-- [ ] SAST and DAST findings joined on CWE + route — duplicates merged
+- [ ] SAST and DAST findings joined only when CWE + normalized route + method (when known) + code scope + attacked parameter match
 - [ ] Each real vulnerability appears exactly once in output
 - [ ] Each finding has `code_location` (file + line) AND/OR `runtime_proof` (URL + evidence)
 - [ ] LangGraph verification loop fires targeted probes and updates finding label
@@ -716,7 +793,7 @@ A submission is considered complete when **all** of the following are true:
 ### Objective 03 — Prioritise What to Fix
 - [ ] All findings labelled: Confirmed / Code only / Runtime only
 - [ ] Confirmed findings always ranked first in UI and API responses
-- [ ] ≥ 70% of raw SAST alerts suppressed as Code only / unreachable
+- [ ] ≥ 70% of raw SAST alerts classified as Code only / unreachable, with reachability reported separately from correlation
 - [ ] Git diff patch generated for at least one Confirmed finding
 - [ ] Re-verification probe confirms patch closes the vulnerability
 

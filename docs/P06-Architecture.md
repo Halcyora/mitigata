@@ -5,7 +5,7 @@
 > Three Objectives: Scan Code+App · Correlate+Merge · Prioritise  
 > Real Incident: INC-06 — 2017 Credit Bureau Breach (~145M records)  
 > PRD: [P06-PRD.md](P06-PRD.md) — source of truth  
-> Architecture version: 1.1 — aligned with official PRD (Anuj, 30 Oct 2026)
+> Architecture version: 1.2 — three-pass AST route mapping and strict correlation
 
 ---
 
@@ -16,7 +16,7 @@
 3. [End-to-End Data Flow](#3-end-to-end-data-flow)
 4. [Component Deep-Dives](#4-component-deep-dives)
    - 4.1 [Ingestion Pipeline — FR-1, FR-2, FR-3](#41-ingestion-pipeline--fr-1-fr-2-fr-3)
-   - 4.2 [AST Route-to-Sink Mapper — FR-4](#42-ast-route-to-sink-mapper--fr-4)
+   - 4.2 [Three-Pass AST Route Mapper — FR-4](#42-three-pass-ast-route-mapper--fr-4)
    - 4.3 [Correlation & Merge Engine — FR-5, FR-6](#43-correlation--merge-engine--fr-5-fr-6)
    - 4.4 [LangGraph Verification Loop — B-1](#44-langgraph-verification-loop--b-1)
    - 4.5 [3-Label Classifier — FR-7, FR-9](#45-3-label-classifier--fr-7-fr-9)
@@ -46,8 +46,8 @@ flowchart TD
     end
 
     subgraph OBJ2["🎯 Objective 02 — Correlate + Merge (FR-4, FR-5, FR-6)"]
-        AST["AST Route-to-Sink Mapper\nFR-4: URL → function → lines\nPython ast · BFS call graph\nDeterministic — no LLM"]
-        CORR["Correlation & Merge Engine\nFR-5: CWE + route join\nFR-6: deduplicate\neach vulnerability once"]
+        AST["Three-Pass AST Route Mapper\nPass 1: routes + prefixes + normalized URL\nPass 2: one-hop helper scopes\nPass 3: request parameter reads\nPython ast · deterministic"]
+        CORR["Correlation & Merge Engine\nFR-5: CWE + route + scope + parameter\nmethod checked where available\nFR-6: deduplicate each pair once"]
         LG["LangGraph Verification\nB-1: Code only → Confirmed\nstateful probe loop\ninternal Docker network"]
         UF --> AST
         AST --> CORR
@@ -147,10 +147,11 @@ sequenceDiagram
     FE->>E: GET /api/graph
     E->>E: semgrep_parser → UnifiedFinding[] (FR-3)
     E->>E: zap_parser → UnifiedFinding[] (FR-3)
-    E->>E: route_extractor → routes[] (FR-4)
-    E->>E: call_graph BFS → reachable/unreachable sinks (FR-4)
-    E->>E: merger → enrich SAST with reachability (B-2)
-    E->>E: correlate_and_merge → merged findings (FR-5, FR-6)
+    E->>E: Pass 1: routes + Blueprint prefixes → normalized RouteNode[]
+    E->>E: Pass 2: handlers + directly called helper scopes
+    E->>E: Pass 3: request parameter reads (path/query/body/header)
+    E->>E: map SAST locations into RouteNode code scopes
+    E->>E: correlate: CWE + route + scope + parameter (+ method)
     E->>E: classifier → Confirmed/Code only/Runtime only (FR-7)
     E->>E: ELK layout → node positions
     E-->>FE: GraphResponse {nodes, edges, stats}
@@ -272,88 +273,90 @@ flowchart LR
     UF --> CHECK
 ```
 
-### 4.2 AST Route-to-Sink Mapper — FR-4
+### 4.2 Three-Pass AST Route Mapper — FR-4
 
-FR-4 is a **must-have** requirement: *"read the source code to list which URL is handled by which function and lines"*.
+FR-4 is a **must-have** requirement: *"read the source code to list which URL is handled by which function and lines"*. The mapper emits a unified `RouteNode`; route identity, source scope, and observed request keys are collected separately so a matching line range alone cannot establish correlation.
 
 ```mermaid
 flowchart TD
-    SRC["/target-src/*.py\nread-only volume mount"]
+    SRC["Read-only target source"]
 
-    subgraph STEP1["Step 1: Parse AST"]
-        PARSE["ast.parse(source)\nfor each .py file"]
+    subgraph P1["Pass 1: Route and prefix mapping"]
+        PARSE["Parse Python modules"]
+        DECL["Extract Flask route decorators and methods"]
+        PREFIX["Resolve register_blueprint url_prefix"]
+        NORMAL["Join prefix and route; normalize dynamic segments"]
+        R1["Route identity: normalized URL + method + handler"]
+        PARSE --> DECL --> PREFIX --> NORMAL --> R1
     end
 
-    subgraph STEP2["Step 2: Extract Routes (FR-4)"]
-        ROUTES["route_extractor.py\n@app.route · @app.post · @app.get\n@app.errorhandler · @router.*\noutput: [{route, function, file, line}]"]
+    subgraph P2["Pass 2: One-hop callee scopes"]
+        HANDLER["Resolve route handler"]
+        CALLEE["Resolve directly called local/imported project helpers"]
+        SCOPES["CodeScope[]: file + start/end lines + function"]
+        HANDLER --> CALLEE --> SCOPES
     end
 
-    subgraph STEP3["Step 3: Find Sinks"]
-        SINKS["sink_detector.py\n.execute(tainted) → CWE-89\nrender_template_string → CWE-94\npickle.loads → CWE-502\njwt.decode(verify=False) → CWE-347\nos.popen(tainted) → CWE-78\nhashlib.md5 → CWE-916\nopen(user_input) → CWE-22\nredirect(user_input) → CWE-601"]
+    subgraph P3["Pass 3: Request parameter reads"]
+        READ["Inspect handler and one-hop helper ASTs"]
+        PARAMS["ParameterRead[]: name + source\npath / query / form / json / header"]
+        READ --> PARAMS
     end
 
-    subgraph STEP4["Step 4: BFS Call Graph"]
-        BFS["call_graph.py\nfor each route handler:\n  BFS(handler, call_edges)\n  → set of reachable functions\nfor each sink:\n  if containing_fn ∈ reachable → reachable\n  else → unreachable (dead code)"]
-    end
+    NODE["Unified RouteNode\nnormalized_url + methods + handler\nscopes[] + input_parameters[]"]
+    SAST["SAST finding\nfile + line + CWE"]
+    SCOPE_MATCH{"SAST location inside\none of the route scopes?"}
+    OUT["Route evidence for correlation\nexact source location + parameter reads"]
+    UNMATCHED["Unresolved or out-of-scope\nnot treated as a route match"]
 
-    subgraph OUT["Output"]
-        REACH["reachable_sinks[]\nlinked to routes\nused for FR-5 correlation"]
-        UNREACH["unreachable_sinks[]\ndead code\nlabel = Code only (B-2 noise cut)"]
-        STATS["stats.suppression_ratio\ntarget ≥ 0.70"]
-    end
-
-    SRC --> PARSE --> STEP2 --> STEP3 --> STEP4
-    STEP4 --> REACH
-    STEP4 --> UNREACH
-    STEP4 --> STATS
+    SRC --> PARSE
+    R1 --> NODE
+    SCOPES --> NODE
+    PARAMS --> NODE
+    NODE --> SCOPE_MATCH
+    SAST --> SCOPE_MATCH
+    SCOPE_MATCH -->|Yes| OUT
+    SCOPE_MATCH -->|No| UNMATCHED
 ```
 
-**FR-4 API output example:**
-```
-GET /api/routes →
-[
-  { "route": "/api/orders",  "function": "get_orders",  "file": "orders.py", "line": 80 },
-  { "route": "/api/login",   "function": "login",       "file": "auth.py",   "line": 42 },
-  { "route": "__error_404__","function": "pnf",         "file": "app.py",    "line": 89 }
-]
-```
+**Example RouteNode after all passes:** Blueprint mounted at `/api`, with
+`@bp.route("/orders/<int:id>")`, resolves to `/api/orders/{param}`. If the
+handler reads `request.args.get("q")` and calls an imported `db.py` helper, the
+node carries `ParameterRead("q", "query")` plus code scopes for the handler and
+direct helper. Pass 2 is intentionally one hop in v1; transitive call chains
+are not claimed as resolved.
 
 ### 4.3 Correlation & Merge Engine — FR-5, FR-6
 
 ```mermaid
 flowchart TD
-    subgraph INPUTS["Inputs (after AST enrichment)"]
-        SF["sast_findings[]\nreachable=True/False\nroutes=['/login', ...]"]
-        DF["dast_findings[]\nurl='http://target/login'\ncwe_id='CWE-347'"]
-    end
+    SAST["SAST finding\nCWE + file + line"]
+    DAST["DAST finding\nCWE + URL + method + attacked parameter"]
+    ROUTES["Three-pass RouteNode[]\nnormalized URL + methods\ncode scopes + observed parameter reads"]
 
-    subgraph FR5["FR-5: Correlate — link DAST to SAST"]
-        JOIN1{CWE match\nAND route match?}
-        JOIN2{CWE match\nonly?}
-        CONF["MERGE → Confirmed\ncode_location + runtime_proof\nmerged_from=[sast.id, dast.id]\nconfidence=0.95"]
-        CONF2["MERGE → Confirmed\nCWE match sufficient\nconfidence=0.80"]
-    end
+    PATH["Parse DAST URL path"]
+    MATCH{"All required evidence matches?\nCWE + normalized route + method\nSAST file:line in scope + read parameter"}
+    CONFIRMED["Confirmed\nmerge SAST + DAST evidence\nmerged_from = both source IDs"]
+    CODE["Code only\nSAST unmatched by strict gate\npreserve AST reachability metadata"]
+    RUNTIME["Runtime only\nDAST unmatched by strict gate"]
+    DEDUP["Track consumed DAST IDs\nat most one confirmed pair per DAST"]
+    SORT["Sort: Confirmed first,\nthen Code only, then Runtime only"]
+    LEFT["Filter DAST IDs not consumed by a confirmed pair"]
 
-    subgraph FR6["FR-6: Merge Duplicates"]
-        DEDUP["consumed_dast_ids set\nprevents double-counting\nscan twice = same result"]
-        SONLY["SAST only → Code only\nno DAST match found"]
-        DONLY["DAST only → Runtime only\nnot consumed by any SAST"]
-    end
-
-    subgraph SORT["FR-9: Prioritised List"]
-        SORTED["sort by label_rank:\nConfirmed=0 (first)\nCode only=1\nRuntime only=2"]
-    end
-
-    SF --> JOIN1
-    DF --> JOIN1
-    JOIN1 -->|Yes| CONF --> DEDUP
-    JOIN1 -->|No| JOIN2
-    JOIN2 -->|Yes| CONF2 --> DEDUP
-    JOIN2 -->|No| SONLY
-    DEDUP --> SORTED
-    SONLY --> SORTED
-    DONLY --> SORTED
+    SAST --> MATCH
+    DAST --> PATH --> MATCH
+    ROUTES --> MATCH
+    MATCH -->|Yes| CONFIRMED --> DEDUP --> SORT
+    MATCH -->|No| CODE --> SORT
+    DAST --> LEFT
+    DEDUP --> LEFT
+    LEFT --> RUNTIME --> SORT
 ```
+
+The correlation gate is conjunctive: a CWE-only or route-only match is not
+enough to label a pair Confirmed. Unresolved route mounts, missing SAST
+locations, dynamic request keys, or absent parameter evidence remain unmatched.
+Each DAST finding can be consumed by at most one SAST finding in a run.
 
 ### 4.4 LangGraph Verification Loop — B-1
 
@@ -393,7 +396,7 @@ flowchart TD
     INPUT([Finding after\ncorrelation + LangGraph]) --> R1
 
     R1{LangGraph=Confirmed\nAND dual_confirmed?}
-    R1 -->|Yes| C1["🔴 Confirmed\nconfidence=0.98\nCWE + route both match"]
+    R1 -->|Yes| C1["🔴 Confirmed\nconfidence=0.98\nCWE + route + scope + parameter match"]
 
     R1 -->|No| R2
     R2{LangGraph=Confirmed?}
@@ -613,7 +616,38 @@ classDiagram
     }
 ```
 
-### 6.2 AlertState — LangGraph
+### 6.2 RouteNode — FR-4 Route Mapping
+
+```mermaid
+classDiagram
+    class RouteNode {
+        +str normalized_url
+        +str original_path
+        +list methods
+        +str handler
+        +CodeScope[] scopes
+        +ParameterRead[] input_parameters
+        +matches_path(path) bool
+        +contains_location(file, line) bool
+    }
+
+    class CodeScope {
+        +str file
+        +int start_line
+        +int end_line
+        +str function
+    }
+
+    class ParameterRead {
+        +str name
+        +str source
+    }
+
+    RouteNode "1" --> "1..*" CodeScope : handler and direct callees
+    RouteNode "1" --> "0..*" ParameterRead : observed request inputs
+```
+
+### 6.3 AlertState — LangGraph
 
 ```mermaid
 classDiagram
@@ -643,7 +677,7 @@ classDiagram
     AlertState "1" --> "0..*" ProbeRecord : probe_history
 ```
 
-### 6.3 GraphResponse — API
+### 6.4 GraphResponse — API
 
 ```mermaid
 classDiagram
@@ -737,7 +771,7 @@ graph TD
     end
 
     subgraph HOW["How We Hit Each"]
-        H20["CWE + route dual-key join\n→ Confirmed label\nFR-5 correlation\nLangGraph B-1 upgrades\nCode only → Confirmed"]
+        H20["CWE + normalized route + method\n+ code scope + attacked parameter\n→ Confirmed label\nLangGraph B-1 verifies Code only"]
         H10["SAST only, no DAST match\n→ Code only label\nFR-7 classification"]
         H6["DAST only, no SAST match\n→ Runtime only label\nFR-7 classification"]
         H8["AST reachability check\nparameterised query detection\nB-2 noise cut\nNOT reported"]
@@ -826,9 +860,10 @@ graph TD
         end
 
         subgraph AST["ast_mapper/"]
+            RS["route_schema.py\nRouteNode · CodeScope · ParameterRead"]
             RE["route_extractor.py\nFR-4\nstdlib: ast, os"]
             SD["sink_detector.py\nstdlib: ast"]
-            CG["call_graph.py\nBFS reachability"]
+            CG["call_graph.py\none-hop helper scopes\nrequest parameter reads"]
             MG["merger.py\nAST enrichment"]
         end
 
@@ -863,7 +898,8 @@ graph TD
     ZP --> SCHEMA
     CORR --> SCHEMA
     MG --> SCHEMA
-    CG --> RE & SD
+    CG --> RE & SD & RS
+    RE --> RS
     GR --> ST & ND
     PA --> LP & TP
     CM --> RC
@@ -902,13 +938,13 @@ graph TD
 graph LR
     subgraph OBJ["Objectives → Components"]
         O1["Objective 01\nFR-1 FR-2 FR-3"] --> C1["semgrep_parser\nzap_parser\nschema UnifiedFinding"]
-        O2["Objective 02\nFR-4 FR-5 FR-6"] --> C2["route_extractor FR-4\ncall_graph BFS\ncorrelator FR-5 FR-6\nmerger"]
+        O2["Objective 02\nFR-4 FR-5 FR-6"] --> C2["three-pass route mapper FR-4\ncorrelator: CWE + route + scope + parameter\nFR-5 FR-6 dedup"]
         O3["Objective 03\nFR-7 FR-8 FR-9"] --> C3["classifier\nlanggraph_loop B-1\nFindingDetailPanel FR-8\ncorrelator sort FR-9"]
     end
 ```
 
 ---
 
-*Architecture version: 1.1 — Mitigata Hackathon Problem 06 (Flagship)*  
+*Architecture version: 1.2 — Mitigata Hackathon Problem 06 (Flagship)*
 *All diagrams use Mermaid — renders natively in GitHub, GitLab, VS Code with Markdown Preview Enhanced, and Obsidian*  
 *Reference: [P06-PRD.md](P06-PRD.md) · [P06-SAST-DAST-Correlation-Engine.md](P06-SAST-DAST-Correlation-Engine.md) · [P06-Build-Plan.md](P06-Build-Plan.md)*

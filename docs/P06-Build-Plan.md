@@ -4,7 +4,7 @@
 > **PRD:** [P06-PRD.md](P06-PRD.md) — source of truth for all requirements  
 > **Reference:** [P06-SAST-DAST-Correlation-Engine.md](P06-SAST-DAST-Correlation-Engine.md)  
 > **One-command start:** `docker compose up --build` → open `http://localhost:3000`  
-> **Build plan version:** 3.1 — aligned with official PRD (Anuj, 30 Oct 2026)  
+> **Build plan version:** 3.2 — 3-pass AST route mapping and parameter-aware correlation
 > **Three mandatory objectives:** Scan Code+App · Correlate+Merge · Prioritise
 
 ---
@@ -17,7 +17,7 @@
 
 | Category | Count | Our Label | How We Hit It |
 |---|---|---|---|
-| Code + Runtime pairs (linkable) | **20** | Confirmed | CWE + route join → merge → LangGraph probe |
+| Code + Runtime pairs (linkable) | **20** | Confirmed | CWE + route + scope + parameter → merge → LangGraph probe |
 | Code only (e.g. hardcoded secrets) | **10** | Code only | SAST only, no DAST match |
 | Runtime only (e.g. missing headers) | **6** | Runtime only | DAST only, no SAST match |
 | Safe decoys (false positive traps) | **~8** | Should NOT be reported | AST reachability + parameterised query detection |
@@ -29,7 +29,7 @@
 |---|---|---|---|
 | Code detection | > 60% | > 85% | Semgrep p/python + p/flask + p/security-audit |
 | Runtime detection | > 50% | > 80% | ZAP targeted scan on all 30 routes |
-| Correct links | > 50% | > 80% | CWE + route dual-key join |
+| Correct links | > 50% | > 80% | CWE + normalized route + code scope + attacked parameter |
 | Wrong links | < 20% | < 5% | AST reachability gates correlation |
 | False alarms | < 30% | < 10% | Parameterised query detection (B-2) |
 | Unseen app | > 40% | > 65% | Generic AST patterns, not app-specific tuning |
@@ -42,8 +42,8 @@
 | FR-1 | SAST scan: file, line, CWE, snippet | `semgrep_parser.py` |
 | FR-2 | DAST scan: URL, method, param, payload, evidence | `zap_parser.py` |
 | FR-3 | One common format with CWE number | `schema.py` (UnifiedFinding) |
-| **FR-4** | **Route map: URL → function → lines** | **`route_extractor.py` + `call_graph.py`** |
-| **FR-5** | **Correlate: CWE + URL → one Confirmed issue** | **`correlator.py`** |
+| **FR-4** | **Route map: URL → function → scopes + read parameters** | **`route_schema.py` + three-pass AST mapper** |
+| **FR-5** | **Correlate: CWE + route + scope + parameter → Confirmed** | **`correlator.py`** |
 | **FR-6** | **Merge duplicates: scan twice = same count** | **`correlator.py` (consumed_dast_ids)** |
 | FR-7 | Label: Confirmed / Code only / Runtime only | `classifier.py` |
 | FR-8 | Issue detail: URL + param + payload + file + line + CWE | `FindingDetailPanel.tsx` |
@@ -85,7 +85,7 @@
 | Objective | What Judges Score | Key Deliverable |
 |---|---|---|
 | **01 — Scan Code and App** | ≥4 CWE types, one common format | `UnifiedFinding` schema with `cwe_id` |
-| **02 — Correlate and Merge** | Link runtime → code, merge duplicates | AST call graph + merge engine |
+| **02 — Correlate and Merge** | Link runtime → code, merge duplicates | Three-pass AST route mapper + strict merge engine |
 | **03 — Prioritise What to Fix** | Confirmed/Code only/Runtime only labels, Confirmed first | Classifier + ranked UI |
 
 ---
@@ -98,7 +98,7 @@ Build in **descending scoring weight** so a partial demo still scores maximally:
 |---|---|---|---|---|
 | 1 | Repo scaffold + target vulnerable app | All | — | Yes — everything runs on this |
 | 2 | Unified ingestion pipeline | Obj 01 | 30 pts (shared) | Yes |
-| 3 ⭐ | AST route-to-sink mapper + merge engine | Obj 02 | 30 pts (shared) | Yes — highest weight |
+| 3 ⭐ | Three-pass AST route mapper + strict correlation | Obj 02 | 30 pts (shared) | Yes — highest weight |
 | 4 | LangGraph verification loop | Obj 02+03 | 25 pts | Yes |
 | 5 | 3-label classifier + prioritised ranking | Obj 03 | 20 pts (shared) | Yes |
 | 6 | Git diff auto-remediation | Obj 03 | 20 pts (shared) | Yes |
@@ -213,9 +213,10 @@ mitigata-p06/
 │   │   ├── zap_parser.py          ← ZAP JSON → UnifiedFinding[]
 │   │   └── correlator.py          ← CWE+route join → merged findings (Obj 02)
 │   ├── ast_mapper/
-│   │   ├── route_extractor.py     ← HTTP route decorator parser
+│   │   ├── route_schema.py        ← RouteNode, CodeScope, ParameterRead
+│   │   ├── route_extractor.py     ← Routes, Blueprint prefixes, URL normalization (Pass 1)
 │   │   ├── sink_detector.py       ← Vulnerable sink pattern matcher
-│   │   ├── call_graph.py          ← BFS reachability from routes (Obj 02)
+│   │   ├── call_graph.py          ← One-hop helper scopes + request reads (Passes 2–3)
 │   │   └── merger.py              ← Enrich SAST findings with AST reachability
 │   ├── langgraph_loop/
 │   │   ├── state.py               ← AlertState TypedDict
@@ -553,48 +554,49 @@ def parse_zap_json(path: str) -> list[UnifiedFinding]:
 
 ### 2.4 Correlation and Merge Engine (Objective 02 — the core)
 
+The correlation gate is deliberately stricter than a CWE-only or substring URL join.
+Pass 1 supplies normalized route templates, Pass 2 supplies route code scopes, and
+Pass 3 supplies the input parameter names read by each handler. A SAST/DAST pair is
+`Confirmed` only when all four checks pass: route, code scope, attacked parameter,
+and CWE. A CWE match without these links is not sufficient evidence to merge.
+
 ```python
 # engine/ingestion/correlator.py
 from urllib.parse import urlparse
 from .schema import UnifiedFinding
+from ..ast_mapper.route_schema import RouteNode
 
 
 def correlate_and_merge(
     sast: list[UnifiedFinding],
     dast: list[UnifiedFinding],
+    routes: list[RouteNode],
 ) -> list[UnifiedFinding]:
     """
-    Objective 02: Link runtime findings to code, merge duplicates.
-    Each real vulnerability appears EXACTLY ONCE in output.
-
-    Algorithm:
-    1. Primary join: CWE ID (same vulnerability class)
-    2. Secondary join: DAST URL path matches SAST finding's reachable routes
-    3. Both match → MERGE into single "Confirmed" finding
-    4. SAST only → "Code only" (reachability determined by AST mapper)
-    5. DAST only → "Runtime only"
-    6. Deduplicate: merged_from tracks all source IDs
+    Confirm a pair only when CWE, normalized route, code scope, and input
+    parameter all match. RouteNode helpers are implemented with the AST mapper.
     """
-    dast_by_cwe: dict[str, list[UnifiedFinding]] = {}
-    for d in dast:
-        dast_by_cwe.setdefault(d.cwe_id, []).append(d)
-
     merged: list[UnifiedFinding] = []
     consumed_dast_ids: set[str] = set()
 
     for s in sast:
-        dast_matches = dast_by_cwe.get(s.cwe_id, [])
-        route_matches = [
-            d for d in dast_matches
-            if d.url and any(
-                r in urlparse(d.url).path
-                for r in (s.routes or [])
+        candidates = []
+        for d in dast:
+            if d.id in consumed_dast_ids:
+                continue
+            if d.cwe_id != s.cwe_id or not d.url:
+                continue
+            path = urlparse(d.url).path
+            candidates.extend(
+                (route, d) for route in routes
+                if route.matches_path(path)
+                and route.matches_method(d.method)
+                and route.contains_location(s.file, s.line)
+                and d.parameter in {read.name for read in route.input_parameters}
             )
-        ]
 
-        if route_matches:
-            # MERGE: both SAST code evidence + DAST runtime proof → Confirmed
-            best_dast = route_matches[0]
+        if candidates:
+            route, best_dast = candidates[0]
             consumed_dast_ids.add(best_dast.id)
             merged.append(s.model_copy(update={
                 "label": "Confirmed",
@@ -605,43 +607,87 @@ def correlate_and_merge(
                 "http_status": best_dast.http_status,
                 "merged_from": [s.id, best_dast.id],
                 "confidence": 0.95,
-            }))
-        elif dast_matches:
-            # CWE matches but no route match — partial correlation, still merge
-            best_dast = dast_matches[0]
-            consumed_dast_ids.add(best_dast.id)
-            merged.append(s.model_copy(update={
-                "label": "Confirmed",   # CWE match is sufficient for merge
-                "url": best_dast.url,
-                "method": best_dast.method,
-                "parameter": best_dast.parameter,
-                "evidence": best_dast.evidence,
-                "merged_from": [s.id, best_dast.id],
-                "confidence": 0.80,
+                "routes": [route.normalized_url],
             }))
         else:
-            # SAST only — no DAST match → Code only
-            merged.append(s.model_copy(update={"label": "Code only"}))
+            merged.append(s.model_copy(update={
+                "label": "Code only",
+                "reachable": any(
+                    route.contains_location(s.file, s.line) for route in routes
+                ),
+            }))
 
-    # Remaining DAST findings not consumed → Runtime only
     for d in dast:
         if d.id not in consumed_dast_ids:
             merged.append(d.model_copy(update={"label": "Runtime only"}))
 
-    # Sort: Confirmed first (Obj 03 ranking requirement)
     label_rank = {"Confirmed": 0, "Code only": 1, "Runtime only": 2}
     merged.sort(key=lambda f: label_rank.get(f.label or "Code only", 1))
-
     return merged
 ```
 
 ---
 
-## Phase 3 — AST Route-to-Sink Mapper ⭐ (Objective 02 — Highest Weight)
+## Phase 3 — Three-Pass AST Route Mapper ⭐ (Objective 02 — Highest Weight)
 
 **Scoring impact:** The core of the 30-pt criterion. This is what judges scrutinise most.
 
-### 3.1 Route decorator extractor
+The mapper builds one unified `RouteNode` per HTTP endpoint, then enriches it in
+three deterministic passes. It replaces line-range-only matching as the source of
+route evidence; line ranges remain useful as code-scope metadata, not as the route
+join by themselves.
+
+| Pass | Name | Responsibility | Output |
+|---|---|---|---|
+| 1 | Route and prefix mapping (SpecWeaver-lite) | Extract route declarations, resolve mounted Flask Blueprint prefixes, and normalize dynamic segments | `normalized_url`, method, handler |
+| 2 | One-hop callee mapping (CPG-lite) | Resolve directly called imported/local helpers from each handler; add their source spans to route scope | Handler and direct-callee scopes |
+| 3 | Input parameter extraction (Respector-lite) | Find request-derived names read in the handler and its one-hop callees | `input_parameters` with source kinds |
+
+MVP framework contract: implement Flask/Python route declarations and
+`register_blueprint(..., url_prefix=...)` first, using the existing Python AST
+pipeline. Keep prefix resolution and path normalization behind framework-neutral
+helpers so a future Express adapter can add `app.use()` mounts and `:id` syntax
+without changing `RouteNode` or the correlator. Do not claim Node/Express parsing
+until that adapter exists.
+
+#### Unified route node
+
+Add `engine/ast_mapper/route_schema.py`. Each route stores its original and
+normalized path, HTTP methods, handler identity, code scopes, and parameter reads.
+`CodeScope` carries `file`, `start_line`, `end_line`, and `function`;
+`ParameterRead` carries `name` and `source` (`path`, `query`, `form`, `json`,
+or `header`).
+
+Example after all three passes:
+
+```text
+RouteNode(
+    normalized_url="/api/orders/{param}",
+    methods=["GET"],
+    handler="orders.list_orders",
+    scopes=[orders.py:10-25, db.py:45-60],
+    input_parameters=[
+        ParameterRead(name="id", source="path"),
+        ParameterRead(name="q", source="query"),
+    ],
+)
+```
+
+The example preserves parameter names for correlation while using a consistent
+`{param}` placeholder for URL matching. Typed Flask converters such as
+`<int:id>` and JavaScript-style `:id` map to the same placeholder; the declared
+name and location are retained separately in the route metadata.
+
+### 3.1 Pass 1 — Route declarations, prefixes, and URL normalization
+
+The route extractor must not emit a decorator path in isolation. It resolves
+Flask Blueprint registration prefixes and joins them to the route path before
+normalization. For example, a Blueprint mounted at `/api` with
+`@bp.route("/orders/<int:id>")` becomes `/api/orders/{param}`. Normalize trailing
+slashes consistently and preserve the original path for diagnostics. A Blueprint
+mounted at multiple statically known prefixes produces a route node per mount.
+A route without a statically resolvable path or prefix is marked unresolved; do
+not silently invent a path.
 
 ```python
 # engine/ast_mapper/route_extractor.py
@@ -649,80 +695,29 @@ import ast
 import os
 from typing import Optional
 
-ROUTE_DECORATORS = {
+FLASK_ROUTE_DECORATORS = {
     "app.route", "app.get", "app.post", "app.put", "app.delete", "app.patch",
-    "router.get", "router.post", "router.route", "router.put", "router.delete",
     "bp.route", "bp.get", "bp.post",
-    "app.errorhandler",        # we45: SSTI in pnf(e) registered here
-    "app.before_request",
-    "app.after_request",
 }
 
 
-def extract_routes(src_dir: str) -> list[dict]:
-    routes = []
-    for root, _, files in os.walk(src_dir):
-        for fname in files:
-            if not fname.endswith(".py"):
-                continue
-            fpath = os.path.join(root, fname)
-            try:
-                source = open(fpath, encoding="utf-8").read()
-                tree = ast.parse(source, filename=fpath)
-            except (SyntaxError, UnicodeDecodeError):
-                continue
-            for node in ast.walk(tree):
-                if isinstance(node, ast.FunctionDef):
-                    for dec in node.decorator_list:
-                        info = _extract_route_info(dec, node, fpath)
-                        if info:
-                            routes.append(info)
-    return routes
+def extract_routes(src_dir: str) -> list[RouteNode]:
+    # Pass 1 has two stages:
+    # 1. Index route decorators and Blueprint declarations by module/symbol.
+    # 2. Resolve app.register_blueprint(bp, url_prefix=...) mounts, join the
+    #    mount prefix to each route path, then normalize dynamic segments.
+    # Keep unresolved/dynamic registrations explicitly marked for diagnostics.
+    ...
 
 
-def _extract_route_info(dec, func, fpath) -> Optional[dict]:
-    dec_name = _get_decorator_name(dec)
-    if dec_name not in ROUTE_DECORATORS:
-        return None
-
-    route_path = "UNKNOWN"
-    methods = ["GET"]
-
-    if isinstance(dec, ast.Call):
-        if dec.args:
-            arg0 = dec.args[0]
-            if isinstance(arg0, ast.Constant):
-                val = arg0.value
-                route_path = f"__error_{val}__" if isinstance(val, int) else str(val)
-        for kw in dec.keywords:
-            if kw.arg == "methods" and isinstance(kw.value, ast.List):
-                methods = [
-                    elt.value for elt in kw.value.elts
-                    if isinstance(elt, ast.Constant)
-                ]
-    elif isinstance(dec, ast.Attribute):
-        attr = dec.attr
-        if attr in ("get", "post", "put", "delete", "patch"):
-            methods = [attr.upper()]
-
-    return {
-        "file": fpath,
-        "function": func.name,
-        "route": route_path,
-        "methods": methods,
-        "line": func.lineno,
-        "decorator": dec_name,
-    }
+def normalize_route_path(path: str) -> str:
+    """Convert Flask <converter:name> segments to the shared {param} form."""
+    ...
 
 
-def _get_decorator_name(dec) -> str:
-    if isinstance(dec, ast.Call):
-        return _get_decorator_name(dec.func)
-    if isinstance(dec, ast.Attribute):
-        return f"{_get_decorator_name(dec.value)}.{dec.attr}"
-    if isinstance(dec, ast.Name):
-        return dec.id
-    return ""
+def resolve_blueprint_prefixes(src_dir: str) -> dict[str, list[str]]:
+    """Resolve all statically declared Flask Blueprint mount prefixes."""
+    ...
 ```
 
 ### 3.2 Sink detector (we45-aware — covers Objective 01 CWE types)
@@ -817,126 +812,77 @@ def find_sinks_in_function(func_node: ast.FunctionDef, file: str) -> list[dict]:
     return sinks
 ```
 
-### 3.3 Call graph builder (BFS from route handlers — Objective 02 linkage proof)
+### 3.3 Pass 2 — Direct callee scopes (CPG-lite)
+
+Index functions by module and resolve direct calls from each route handler to
+imported or same-project helpers. Add the called function's exact file and line
+span to that route's `scopes`. This is intentionally a one-hop expansion in v1:
+do not imply transitive reachability when a helper calls another helper. Keep
+unresolved external/library calls out of project scopes.
 
 ```python
 # engine/ast_mapper/call_graph.py
 import ast
 import os
-from collections import deque
 from .route_extractor import extract_routes
 from .sink_detector import find_sinks_in_function
 
 
 def build_call_graph(src_dir: str) -> dict:
     """
-    Objective 02: Deterministic linkage from HTTP route → code sink.
-    Returns structured call graph with reachable/unreachable classification.
+    Pass 2: add each handler and its directly called project functions as scopes.
     """
     routes = extract_routes(src_dir)
-    all_funcs = _extract_all_functions(src_dir)
-    call_edges = _extract_call_edges(src_dir)
-
-    reachable_per_route: dict[str, set[str]] = {}
-    for r in routes:
-        reachable_per_route[r["route"]] = _bfs_reachable(r["function"], call_edges)
-
-    reachable_sinks, unreachable_sinks = [], []
-
-    for func_name, (func_node, fpath) in all_funcs.items():
-        sinks = find_sinks_in_function(func_node, fpath)
-        for sink in sinks:
-            routes_reaching = [
-                r["route"] for r in routes
-                if func_name in reachable_per_route.get(r["route"], set())
-                   or func_name == r["function"]
-            ]
-            sink["reachable_from_routes"] = routes_reaching
-            if routes_reaching:
-                reachable_sinks.append(sink)
-            else:
-                unreachable_sinks.append(sink)   # Code only — suppress
-
-    total = len(reachable_sinks) + len(unreachable_sinks)
-    suppression_ratio = len(unreachable_sinks) / total if total > 0 else 0.0
-
+    function_index = _index_project_functions(src_dir)
+    for route in routes:
+        handler = function_index[route.handler]
+        callees = _resolve_direct_project_callees(handler, function_index)
+        route.scopes = [_scope_for(handler)]
+        for callee in callees:
+            route.scopes.append(_scope_for(callee))
+    extract_request_parameters(routes, function_index)
     return {
         "routes": routes,
-        "sinks": reachable_sinks,
-        "unreachable_sinks": unreachable_sinks,
-        "stats": {
-            "total_sinks": total,
-            "reachable": len(reachable_sinks),
-            "unreachable": len(unreachable_sinks),
-            "suppression_ratio": round(suppression_ratio, 3),
-        },
+        "stats": _summarize_sink_reachability(routes, function_index),
     }
-
-
-def _bfs_reachable(start: str, edges: dict[str, set[str]]) -> set[str]:
-    visited, queue = set(), deque([start])
-    while queue:
-        fn = queue.popleft()
-        if fn in visited:
-            continue
-        visited.add(fn)
-        for callee in edges.get(fn, set()):
-            if callee not in visited:
-                queue.append(callee)
-    return visited
-
-
-def _extract_all_functions(src_dir: str) -> dict[str, tuple]:
-    funcs = {}
-    for root, _, files in os.walk(src_dir):
-        for fname in files:
-            if not fname.endswith(".py"):
-                continue
-            fpath = os.path.join(root, fname)
-            try:
-                tree = ast.parse(open(fpath, encoding="utf-8").read())
-            except (SyntaxError, UnicodeDecodeError):
-                continue
-            for node in ast.walk(tree):
-                if isinstance(node, ast.FunctionDef):
-                    funcs[node.name] = (node, fpath)
-    return funcs
-
-
-def _extract_call_edges(src_dir: str) -> dict[str, set[str]]:
-    edges: dict[str, set[str]] = {}
-    for root, _, files in os.walk(src_dir):
-        for fname in files:
-            if not fname.endswith(".py"):
-                continue
-            fpath = os.path.join(root, fname)
-            try:
-                tree = ast.parse(open(fpath, encoding="utf-8").read())
-            except (SyntaxError, UnicodeDecodeError):
-                continue
-            for node in ast.walk(tree):
-                if isinstance(node, ast.FunctionDef):
-                    caller = node.name
-                    edges.setdefault(caller, set())
-                    for child in ast.walk(node):
-                        if isinstance(child, ast.Call):
-                            callee = _get_call_name(child)
-                            if callee:
-                                edges[caller].add(callee)
-    return edges
-
-
-def _get_call_name(call: ast.Call) -> str | None:
-    if isinstance(call.func, ast.Name):
-        return call.func.id
-    if isinstance(call.func, ast.Attribute):
-        return call.func.attr
-    return None
 ```
 
-**Critical test for Objective 02:** `assert call_graph["stats"]["suppression_ratio"] >= 0.70`
+### 3.4 Pass 3 — Request parameter extraction (Respector-lite)
 
-### 3.4 Merger: enrich SAST findings with AST reachability
+Walk each route handler and its one-hop callee ASTs for framework request reads.
+Record the exact request key and source kind, such as Flask `request.args["q"]`
+or `request.args.get("q")` as `ParameterRead("q", "query")`, and path arguments
+such as `id` as `ParameterRead("id", "path")`. Include `request.form`, JSON body
+access, and headers using the same representation. Only names statically observed
+as read are eligible for a DAST parameter match; an unknown or dynamic key is not
+a wildcard.
+
+```python
+def extract_request_parameters(
+    routes: list[RouteNode],
+    function_index: dict,
+) -> None:
+    for route in routes:
+        handler = function_index[route.handler]
+        callees = _resolve_direct_project_callees(handler, function_index)
+        route.input_parameters = _extract_request_reads([handler, *callees])
+```
+
+The correlator receives the final route list as `call_graph["routes"]`;
+`input_parameters` is a list of `ParameterRead` values.
+
+**Critical Phase 3 acceptance checks:**
+
+- Blueprint `/api` + route `/orders/<int:id>` produces `/api/orders/{param}`.
+- DAST `/api/orders/42?q=test` matches that template and extracts `q` as the attacked query parameter.
+- A SAST finding in an imported direct helper's source span is in route scope; an unrelated function/file is not.
+- The route records path `id` and query `q` reads independently.
+- Correlation requires route + scope + attacked parameter + CWE; wrong parameter, route, or CWE does not produce `Confirmed`.
+- Unresolved mounts, imports, missing SAST locations, or dynamic request keys remain explicit/unmatched rather than becoming broad matches.
+
+**Critical suppression target:** `call_graph["stats"]["suppression_ratio"] >= 0.70`
+
+### 3.5 Merger: enrich SAST findings with AST reachability
 
 ```python
 # engine/ast_mapper/merger.py
@@ -947,27 +893,22 @@ def enrich_findings_with_ast(
     findings: list[UnifiedFinding],
     call_graph: dict,
 ) -> list[UnifiedFinding]:
-    """Tag each SAST finding as reachable or unreachable based on call graph."""
-    reachable_index: dict[tuple, list[str]] = {
-        (s["file"], s["line"]): s.get("reachable_from_routes", [])
-        for s in call_graph["sinks"]
-    }
-    unreachable_lines = {
-        (s["file"], s["line"]) for s in call_graph["unreachable_sinks"]
-    }
+    """Set route evidence when the SAST location is inside a route code scope."""
 
     enriched = []
+    routes = call_graph["routes"]
     for f in findings:
         if f.source != "sast":
             enriched.append(f)
             continue
-        key = (f.file, f.line)
-        if key in reachable_index:
-            f = f.model_copy(update={"reachable": True, "routes": reachable_index[key]})
-        elif key in unreachable_lines:
-            f = f.model_copy(update={"reachable": False, "routes": [], "label": "Code only"})
-        else:
-            f = f.model_copy(update={"reachable": None, "routes": []})
+        matching_routes = [
+            route.normalized_url for route in routes
+            if route.contains_location(f.file, f.line)
+        ]
+        f = f.model_copy(update={
+            "reachable": bool(matching_routes),
+            "routes": matching_routes,
+        })
         enriched.append(f)
     return enriched
 ```
@@ -1526,6 +1467,8 @@ COMPLIANCE_MAP: dict[str, dict] = {
 - [ ] Graph renders in < 3 seconds (check browser Performance tab)
 - [ ] Confirmed findings appear first in graph and list (Objective 03)
 - [ ] At least 1 Confirmed finding with HTTP evidence and confidence score visible
+- [ ] Show `/api/orders/42?q=test` resolving to `/api/orders/{param}`, including the `db.py` helper scope and query parameter `q`
+- [ ] Verify wrong route, wrong parameter, wrong code scope, and wrong CWE each remain unlinked
 - [ ] At least 5 Code only findings suppressed (verify suppression ratio ≥ 70%)
 - [ ] "Verify" button fires probe, shows retry loop in probe_history, flips label live
 - [ ] "Auto-Remediate" shows diff preview (GPT-4o or template), applies, re-verifies
@@ -1550,7 +1493,7 @@ COMPLIANCE_MAP: dict[str, dict] = {
 | Criterion | Max | Objective | Self-check | Evidence |
 |---|---|---|---|---|
 | ≥ 4 CWE types in one common format (SQLi + XSS mandatory) | 30 | Obj 01 | [ ] | Show `stats.cwe_types_covered` in UI |
-| AST call graph built deterministically (no LLM before AST) | 30 | Obj 02 | [ ] | Show `call_graph["stats"]` JSON |
+| Three-pass AST maps prefixes, one-hop helper scopes, and read parameters deterministically | 30 | Obj 02 | [ ] | Show `RouteNode` and `call_graph["stats"]` |
 | Each vulnerability appears exactly once (deduplication) | 30 | Obj 02 | [ ] | Show `merged_from` field in finding |
 | Runtime finding linked to exact code line | 30 | Obj 02 | [ ] | Show `code_location.file + line` |
 | Confirmed/Code only/Runtime only labels assigned | 20 | Obj 03 | [ ] | Show label badges in UI |
@@ -1567,9 +1510,9 @@ COMPLIANCE_MAP: dict[str, dict] = {
 
 ---
 
-## Key Decisions Log (v2.0 → v3.0)
+## Key Decisions Log (v2.0 → v3.2)
 
-| Decision | v2.0 | v3.0 | Reason |
+| Decision | v2.0 | v3.0 | v3.2 |
 |---|---|---|---|
 | Classification labels | T1/T2/T3/T4 | **Confirmed/Code only/Runtime only** | Aligned with official Problem 06 statement |
 | Label ranking | T1 first | **Confirmed first** — explicit Objective 03 requirement | Problem statement: "rank confirmed issues first" |
@@ -1578,8 +1521,9 @@ COMPLIANCE_MAP: dict[str, dict] = {
 | Compliance frameworks | RBI + SEBI + ISO + DPDP | Same + **INC-06 breach reference** | Problem statement references 2017 credit bureau breach |
 | XSS (CWE-79) | In dead_code_helpers | **Promoted to mandatory (Obj 01)** | Problem statement: SQLi AND XSS are mandatory |
 | Containerisation | Docker Compose provided | **Hard requirement — all services containerised** | Problem statement: "containerized form" required |
+| AST-to-DAST matching | CWE + route text | — | Three passes resolve route prefixes, direct helper scopes, and exact read parameters; all four correlation checks must pass |
 
 ---
 
-*Build plan version: 3.0 — Mitigata Hackathon Problem 06 (Flagship)*  
-*Updated: Aligned with official Problem 06 statement — three mandatory objectives; Confirmed/Code only/Runtime only labels; containerisation as hard requirement; INC-06 credit bureau breach reference; XSS promoted to mandatory*
+*Build plan version: 3.2 — Mitigata Hackathon Problem 06 (Flagship)*
+*Updated: Added three-pass AST route mapping, explicit Flask Blueprint prefix handling, one-hop helper scopes, request parameter extraction, and strict route/scope/parameter/CWE correlation.*
