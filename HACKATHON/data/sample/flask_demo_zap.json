@@ -1,0 +1,15 @@
+{
+  "target_id": "flask_demo",
+  "scan": "dast",
+  "url": "http://target-flask:5050",
+  "status_code": 200,
+  "alerts": [
+    {
+      "url": "http://target-flask:5050/login",
+      "method": "POST",
+      "param": "username",
+      "payload": "demo",
+      "evidence": "Sample ZAP fixture for the Flask target profile."
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "target_id": "juice_shop",
+  "scan": "dast",
+  "url": "http://target-juice-shop:3000",
+  "status_code": 200,
+  "alerts": [
+    {
+      "url": "http://target-juice-shop:3000/rest/user/login",
+      "method": "POST",
+      "param": "email",
+      "payload": "demo@example.com",
+      "evidence": "Sample ZAP fixture for the Juice Shop target profile."
+    }
+  ]
+}

@@ -33,6 +33,32 @@ function getLine(sourceFile, pos) {
   return sourceFile.getLineAndCharacterOfPosition(pos).line + 1;
 }
 
+function getPathLiteral(arg) {
+  if (!arg) return null;
+  if (ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg)) return arg.text;
+  return null;
+}
+
+function getRoutePathFromCallExpression(node) {
+  if (!ts.isCallExpression(node)) return null;
+  const expr = node.expression;
+  if (!ts.isPropertyAccessExpression(expr)) return null;
+
+  const methodName = expr.name.text.toLowerCase();
+  if (methodName === "route") {
+    return getPathLiteral(node.arguments[0]);
+  }
+
+  if (ts.isCallExpression(expr.expression) && ts.isPropertyAccessExpression(expr.expression.expression)) {
+    const baseMethod = expr.expression.expression.name.text.toLowerCase();
+    if (baseMethod === "route") {
+      return getPathLiteral(expr.expression.expression.arguments[0]);
+    }
+  }
+
+  return null;
+}
+
 function analyzeFunctionBody(fnNode, sourceFile) {
   const params = [];
   const calls = [];
@@ -265,11 +291,30 @@ function parseFile(filePath, rootDir) {
         }
       }
 
-      // Case 2: app.get('/rest/products/search', middleware, handler)
+      // Case 2: router.route('/users/:id').get(handler) or app.route('/users/:id').post(handler)
+      let routePath = null;
+      let routeRouterName = routerName;
+
+      if (ts.isCallExpression(receiver) && ts.isPropertyAccessExpression(receiver.expression)) {
+        const nestedMethod = receiver.expression.name.text.toLowerCase();
+        if (nestedMethod === "route") {
+          routePath = getRoutePathFromCallExpression(receiver);
+          if (routePath) {
+            routeRouterName = ts.isIdentifier(receiver.expression.expression)
+              ? receiver.expression.expression.text
+              : routerName;
+          }
+        }
+      }
+
+      const effectiveRoutePath = routePath || getPathLiteral(node.arguments[0]);
+      const maybeHttpMethod = routePath ? methodOrUse : null;
+
+      // Case 3: app.get('/rest/products/search', middleware, handler)
       if (HTTP_METHODS.has(methodOrUse) && node.arguments.length >= 2) {
         const firstArg = node.arguments[0];
-        if (ts.isStringLiteral(firstArg) || ts.isNoSubstitutionTemplateLiteral(firstArg)) {
-          const routePath = firstArg.text;
+        const routePathValue = getPathLiteral(firstArg);
+        if (routePathValue) {
           const handlerArg = node.arguments[node.arguments.length - 1];
           const middlewareArgs = node.arguments.slice(1, -1);
           const middlewares = middlewareArgs.map((m) => m.getText(sourceFile));
@@ -302,13 +347,54 @@ function parseFile(filePath, rootDir) {
           routes.push({
             router: routerName,
             method: methodOrUse.toUpperCase(),
-            path: routePath,
+            path: routePathValue,
             handler_ref: handlerRef,
             middlewares,
             inline_handler: inlineHandler,
             line: getLine(sourceFile, node.getStart(sourceFile)),
           });
         }
+      }
+
+      if (routePath && maybeHttpMethod && HTTP_METHODS.has(methodOrUse) && node.arguments.length >= 1) {
+        const handlerArg = node.arguments[node.arguments.length - 1];
+        const middlewareArgs = node.arguments.slice(0, -1);
+        const middlewares = middlewareArgs.map((m) => m.getText(sourceFile));
+
+        let handlerRef = null;
+        let inlineHandler = null;
+
+        if (ts.isArrowFunction(handlerArg) || ts.isFunctionExpression(handlerArg)) {
+          const inlineName = `inline_${methodOrUse}_${getLine(sourceFile, handlerArg.getStart(sourceFile))}`;
+          const { params, calls } = analyzeFunctionBody(handlerArg, sourceFile);
+          inlineHandler = {
+            name: inlineName,
+            start_line: getLine(sourceFile, handlerArg.getStart(sourceFile)),
+            end_line: getLine(sourceFile, handlerArg.getEnd()),
+            params,
+            calls,
+          };
+        } else if (ts.isIdentifier(handlerArg)) {
+          handlerRef = handlerArg.text;
+        } else if (ts.isCallExpression(handlerArg)) {
+          if (ts.isIdentifier(handlerArg.expression)) {
+            handlerRef = handlerArg.expression.text;
+          } else if (ts.isPropertyAccessExpression(handlerArg.expression)) {
+            handlerRef = `${handlerArg.expression.expression.getText(sourceFile)}.${handlerArg.expression.name.text}`;
+          }
+        } else if (ts.isPropertyAccessExpression(handlerArg)) {
+          handlerRef = `${handlerArg.expression.getText(sourceFile)}.${handlerArg.name.text}`;
+        }
+
+        routes.push({
+          router: routeRouterName,
+          method: methodOrUse.toUpperCase(),
+          path: routePath,
+          handler_ref: handlerRef,
+          middlewares,
+          inline_handler: inlineHandler,
+          line: getLine(sourceFile, node.getStart(sourceFile)),
+        });
       }
     }
 

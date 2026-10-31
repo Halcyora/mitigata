@@ -34,3 +34,21 @@ unchanged; the local Dockerfile uses a Python 3 runtime plus a small, checked
 compatibility patch and pinned dependencies. The runtime patch is separate from
 the upstream source and is listed by the `runtime_overlay` field in the Flask
 profile. The test target is not a production deployment.
+
+## Phase 1.7 build inputs
+
+The build inputs are intentionally kept reproducible and pinned:
+
+- Flask target: `targets/vulnerable_flask/requirements.txt` lists the exact Python
+  dependencies used by the runtime overlay.
+- Flask wheels: `targets/vulnerable_flask/wheelhouse/` is populated by
+  `scripts/fetch_flask_wheels.ps1` and used by the Dockerfile with
+  `--no-index --find-links=/tmp/wheels` so the image can install offline.
+- Source revision: `scripts/fetch_targets.ps1` checks out the pinned upstream
+  revisions for both the Flask fixture and Juice Shop.
+- Juice Shop image: `docker-compose.yml` uses the dedicated immutable image digest
+  for `bkimminich/juice-shop:v20.3.0`, and the source checkout is pinned by the
+  matching revision in `configs/juice_shop.yaml`.
+
+This keeps the target source and runtime artifacts tied to the same tested
+configuration and prevents accidental drift across scanning runs.

@@ -1,0 +1,18 @@
+{
+  "target_id": "juice_shop",
+  "scan": "semgrep",
+  "results": [
+    {
+      "check_id": "javascript.security.audit.weak-crypto",
+      "path": "app.js",
+      "start": {"line": 10, "column": 1},
+      "end": {"line": 20, "column": 2},
+      "extra": {
+        "metadata": {
+          "cwe": ["CWE-327"],
+          "severity": "WARNING"
+        }
+      }
+    }
+  ]
+}

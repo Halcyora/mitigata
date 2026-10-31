@@ -72,3 +72,33 @@ def test_flask_three_pass_parser(tmp_path: Path):
     slug_match = match_dast_to_route("http://localhost:5000/users/guest42?tab=profile", "GET", mixed_slug_routes)
     assert slug_match is not None
     assert slug_match.handler_function == "show_user"
+
+
+def test_express_router_route_chain_parser(tmp_path: Path):
+    (tmp_path / "routes").mkdir()
+
+    (tmp_path / "app.js").write_text(
+        "const express = require('express');\n"
+        "const router = express.Router();\n"
+        "const users = require('./routes/users');\n"
+        "router.route('/orders/:id').get(users.getOrder);\n"
+        "app.use('/api', router);\n",
+        encoding="utf-8",
+    )
+
+    (tmp_path / "routes" / "users.js").write_text(
+        "function getOrder(req, res) {\n"
+        "  const orderId = req.params.id;\n"
+        "  return res.json({ orderId });\n"
+        "}\n"
+        "module.exports = { getOrder };\n",
+        encoding="utf-8",
+    )
+
+    parser = get_parser("javascript")
+    routes = parser.parse_project(tmp_path)
+
+    assert any(
+        route.raw_url == "/api/orders/:id" and route.normalized_url == "/api/orders/{param}" and route.method == "GET"
+        for route in routes
+    )
