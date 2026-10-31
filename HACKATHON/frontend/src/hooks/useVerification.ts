@@ -26,12 +26,14 @@ export function useVerification(findingId: string | null, targetId: TargetId) {
   const [status, setStatus] = useState<VerificationStatus>("idle");
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(
-    () => () => {
-      sourceRef.current?.close();
-    },
-    [findingId, targetId],
-  );
+  useEffect(() => {
+    sourceRef.current?.close();
+    setLabel(null);
+    setProbeHistory([]);
+    setStatus("idle");
+    setError(null);
+    return () => sourceRef.current?.close();
+  }, [findingId, targetId]);
 
   const verify = useCallback(() => {
     if (!findingId || status === "running") return;
@@ -66,14 +68,22 @@ export function useVerification(findingId: string | null, targetId: TargetId) {
           if (!current || !event.label || !isFindingLabel(event.label)) {
             return current;
           }
-          const nodes = current.nodes.map((node) =>
-            node.data.finding_id === findingId
-              ? {
-                  ...node,
-                  data: { ...node.data, finding_label: event.label },
-                }
-              : node,
-          );
+          const graphLabel: FindingLabel = event.label;
+          const nodes = current.nodes.map((node) => {
+            if (node.data.finding_id !== findingId) return node;
+            return {
+              ...node,
+              type:
+                graphLabel === "Confirmed" && node.type === "suppressed"
+                  ? "sink"
+                  : node.type,
+              data: {
+                ...node.data,
+                finding_label: graphLabel,
+                evidence: event.evidence ?? node.data.evidence,
+              },
+            };
+          });
           const labels = nodes
             .filter(
               (node) =>
@@ -84,6 +94,13 @@ export function useVerification(findingId: string | null, targetId: TargetId) {
           return {
             ...current,
             nodes,
+            edges: current.edges.map((edge) =>
+              graphLabel === "Confirmed" &&
+              (edge.target === `finding:${findingId}` ||
+                edge.source === `finding:${findingId}`)
+                ? { ...edge, animated: true }
+                : edge,
+            ),
             stats: {
               ...current.stats,
               confirmed: labels.filter((value) => value === "Confirmed").length,

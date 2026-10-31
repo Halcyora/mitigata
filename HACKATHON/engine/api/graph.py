@@ -270,6 +270,32 @@ def _finding_route_indices(
     ]
 
 
+def _seed_node_positions(nodes: list[GraphNode]) -> list[GraphNode]:
+    layer_by_type = {
+        "endpoint": 0,
+        "controller": 1,
+        "sink": 2,
+        "suppressed": 2,
+        "evidence": 3,
+    }
+    positioned: list[GraphNode] = []
+    for layer in range(4):
+        layer_nodes = [node for node in nodes if layer_by_type[node.type] == layer]
+        midpoint = (len(layer_nodes) - 1) / 2
+        positioned.extend(
+            node.model_copy(
+                update={
+                    "position": {
+                        "x": (index - midpoint) * 280.0,
+                        "y": layer * 180.0,
+                    }
+                }
+            )
+            for index, node in enumerate(layer_nodes)
+        )
+    return positioned
+
+
 def _build_snapshot(target_id: TargetId) -> GraphSnapshot:
     profile = _profile_data(target_id)
     routes, route_stats = _routes_and_stats(target_id, profile)
@@ -291,7 +317,7 @@ def _build_snapshot(target_id: TargetId) -> GraphSnapshot:
                 type=node_type,
                 position={"x": 0.0, "y": 0.0},
                 data=GraphNodeData(
-                    label=f"{finding.cwe_id} · {finding.sink_type or finding.rule_id or 'finding'}",
+                    label=f"{finding.cwe_id}: {finding.sink_type or finding.rule_id or 'finding'}",
                     target_id=target_id,
                     finding_id=finding.id,
                     finding_label=finding.label,
@@ -353,7 +379,7 @@ def _build_snapshot(target_id: TargetId) -> GraphSnapshot:
     return GraphSnapshot(
         response=GraphResponse(
             target_id=target_id,
-            nodes=nodes,
+            nodes=_seed_node_positions(nodes),
             edges=edges,
             stats=stats,
         ),

@@ -88,3 +88,24 @@ XSS, command injection, weak password hashes, JWT verification, or SSTI.
 applied automatically. Callers must review a result in the context of the
 specific project and test it before applying. Unsupported sinks without an
 available LLM patch raise `PatchGenerationError`.
+
+## Phase 7 graph API and dashboard
+
+`GET /api/graph?target_id=flask_demo` (or `juice_shop`) parses that profile's
+Semgrep/ZAP reports, maps its routes, correlates findings, and returns graph
+nodes, edges, and target-local statistics. Findings are sorted with Confirmed
+first and receive stable IDs so the UI can safely use them for detail selection
+and verification. API nodes include seed coordinates; the dashboard computes
+the final hierarchical layout with ELK. Graph snapshots are cached for ten
+seconds.
+
+`GET /api/verify/{finding_id}/stream?target_id=...` starts the existing bounded
+LangGraph verification for that target's Code only finding and streams label,
+probe-history, and final status updates as SSE. The finding must belong to the
+selected target; runtime-only findings cannot be submitted for code verification.
+Verification continues to use the configured local target origin and the
+existing safe probe constraints.
+
+The React dashboard in `frontend/` uses TanStack Query for target-keyed data,
+React Flow for graph interaction, and ELK layered layout. Its detail panel
+shows finding location, evidence, confidence, and live probe history.

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import time
 from collections.abc import AsyncIterator
 from typing import Literal
 
@@ -23,7 +22,12 @@ TargetId = Literal["flask_demo", "juice_shop"]
 app = FastAPI(title="Mitigata correlation engine")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
     allow_methods=["GET"],
     allow_headers=["*"],
 )
@@ -81,10 +85,12 @@ async def verify_stream(
                 "done": False,
             }
         )
+        final_state = initial_state
         try:
             async for state in verification_graph.astream(
                 initial_state, stream_mode="values"
             ):
+                final_state = state
                 current_label = state["label"]
                 payload: dict[str, object] = {
                     "finding_id": finding.id,
@@ -104,8 +110,9 @@ async def verify_stream(
                     "finding_id": finding.id,
                     "target_id": target_id,
                     "label": current_label,
-                    "probe_history": state["probe_history"],
-                    "evidence": state.get("evidence"),
+                    "probe_history": final_state["probe_history"],
+                    "evidence": final_state.get("evidence"),
+                    "error": final_state.get("error"),
                     "done": True,
                 }
             )
@@ -122,7 +129,7 @@ async def verify_stream(
                     "done": True,
                     "error": "Verification failed; check the engine logs.",
                 },
-                event="error",
+                event="verification-error",
             )
 
     return StreamingResponse(

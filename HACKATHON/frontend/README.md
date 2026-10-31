@@ -1,6 +1,21 @@
-# Frontend scaffold
+# Correlation graph dashboard
 
-This directory is the planned UI shell for the correlation dashboard.
+The Phase 7 dashboard is a React + Vite application. It fetches target-scoped
+graph snapshots from the FastAPI engine, lays out the endpoint-to-finding path
+with ELK, and streams runtime verification events into the graph and detail
+panel.
 
-The eventual Vite/React app will render the correlated findings, route graph,
-and detail panel for the Flask and Juice Shop targets.
+## Run locally
+
+```powershell
+npm ci
+npm run dev
+```
+
+The development server is available at `http://localhost:5173` and calls the
+engine at `http://localhost:8000`. Set `VITE_API_BASE_URL` when the engine is
+hosted elsewhere. The target selector keeps graph queries and verification
+requests isolated by `target_id`.
+
+Run `npm run build` to type-check and create the production bundle. The
+container serves that bundle on port 3000 using Vite Preview.

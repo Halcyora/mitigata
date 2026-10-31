@@ -8,6 +8,7 @@ export type GraphNodeType =
   | "suppressed";
 
 export interface GraphNodeData {
+  [key: string]: unknown;
   label: string;
   target_id: TargetId;
   finding_id?: string | null;

@@ -1,9 +1,13 @@
-FROM python:3.11-slim
+FROM node:22-alpine
 
 WORKDIR /app
 
-COPY . /app
+COPY package.json package-lock.json ./
+RUN npm ci
+
+COPY . .
+RUN npm run build
 
 EXPOSE 3000
 
-CMD ["python", "-m", "http.server", "3000", "--bind", "0.0.0.0"]
+CMD ["npm", "run", "preview", "--", "--host", "0.0.0.0", "--port", "3000"]
