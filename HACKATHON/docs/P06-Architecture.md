@@ -5,7 +5,7 @@
 > Three Objectives: Scan Code+App · Correlate+Merge · Prioritise  
 > Real Incident: INC-06 — 2017 Credit Bureau Breach (~145M records)  
 > PRD: [P06-PRD.md](P06-PRD.md) — source of truth  
-> Architecture version: 1.3 — multi-target Flask/Express route mapping and strict correlation
+> Architecture version: 1.4 — route-aware planner, mandatory GraphCodeBERT ranking, and time-budgeted DAST
 
 ---
 
@@ -47,10 +47,12 @@ flowchart TD
 
     subgraph OBJ2["🎯 Objective 02 — Correlate + Merge (FR-4, FR-5, FR-6)"]
         AST["Three-Pass AST Route Mapper\nPass 1: routes + prefixes + normalized URL\nPass 2: one-hop helper scopes\nPass 3: request parameter reads\nFlask Python + Express JavaScript adapters"]
+        PLAN["DAST Planner + Mandatory GraphCodeBERT\nroute/rule prioritisation\nreason codes + scan tasks"]
         CORR["Correlation & Merge Engine\nFR-5: target + CWE + route + scope + parameter\nmethod/source checked when available\nFR-6: deduplicate each pair once"]
         LG["LangGraph Verification\nB-1: Code only → Confirmed\nstateful probe loop\ninternal Docker network"]
         UF --> AST
-        AST --> CORR
+        AST --> PLAN
+        PLAN --> CORR
         CORR --> LG
     end
 
@@ -154,6 +156,10 @@ sequenceDiagram
     E->>E: Pass 1: routes + mounts/prefixes → normalized RouteNode[]
     E->>E: Pass 2: handlers + directly called helper scopes
     E->>E: Pass 3: request parameter reads (path/query/body/header)
+    E->>E: build route/finding candidate map + deterministic reason codes
+    E->>E: mandatory GraphCodeBERT routing ranker enriches ambiguous candidates
+    E->>E: DAST planner creates targeted ScanPlan + ScanTask queue
+    E->>E: ZAP executes targeted tests first, then broad coverage within budget
     E->>E: map SAST locations into RouteNode code scopes
     E->>E: correlate: target + CWE + route + scope + parameter (+ method/source)
     E->>E: classifier → Confirmed/Code only/Runtime only (FR-7)
@@ -954,13 +960,13 @@ graph TD
 graph LR
     subgraph OBJ["Objectives → Components"]
         O1["Objective 01\nFR-1 FR-2 FR-3"] --> C1["semgrep_parser\nzap_parser\nschema UnifiedFinding"]
-        O2["Objective 02\nFR-4 FR-5 FR-6"] --> C2["three-pass Flask/Express route adapters FR-4\ncorrelator: target + CWE + route + scope + parameter\nmethod/source when available · FR-5 FR-6 dedup"]
+        O2["Objective 02\nFR-4 FR-5 FR-6"] --> C2["three-pass Flask/Express route adapters FR-4\nroute-aware DAST planner + GraphCodeBERT ranking\ncorrelator: target + CWE + route + scope + parameter\nmethod/source when available · FR-5 FR-6 dedup"]
         O3["Objective 03\nFR-7 FR-8 FR-9"] --> C3["classifier\nlanggraph_loop B-1\nFindingDetailPanel FR-8\ncorrelator sort FR-9"]
     end
 ```
 
 ---
 
-*Architecture version: 1.3 — Mitigata Hackathon Problem 06 (Flagship); Flask + Express multi-target architecture*
+*Architecture version: 1.4 — Mitigata Hackathon Problem 06 (Flagship); route-aware planner with mandatory GraphCodeBERT ranking and time-budgeted DAST*
 *All diagrams use Mermaid — renders natively in GitHub, GitLab, VS Code with Markdown Preview Enhanced, and Obsidian*  
 *Reference: [P06-PRD.md](P06-PRD.md) · [P06-SAST-DAST-Correlation-Engine.md](P06-SAST-DAST-Correlation-Engine.md) · [P06-Build-Plan.md](P06-Build-Plan.md)*

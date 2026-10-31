@@ -4,7 +4,7 @@
 > **PRD:** [P06-PRD.md](P06-PRD.md) — source of truth for all requirements  
 > **Reference:** [P06-SAST-DAST-Correlation-Engine.md](P06-SAST-DAST-Correlation-Engine.md)  
 > **One-command start:** `docker compose up --build` → open `http://localhost:3000`  
-> **Build plan version:** 3.3 — Flask + Express adapters and multi-target scanning
+> **Build plan version:** 3.4 — GraphCodeBERT-required planner + time-budgeted DAST
 > **Three mandatory objectives:** Scan Code+App · Correlate+Merge · Prioritise
 
 ---
@@ -108,6 +108,109 @@ Build in **descending scoring weight** so a partial demo still scores maximally:
 | 7 | Correlation graph UI | All | 10 pts | Yes |
 | 8 | Compliance translator | — | 15 pts | Yes |
 | 9 | Demo polish + containerisation verification | — | 10 pts | Yes |
+
+---
+
+## Architecture Improvement Layer (integrated into the build)
+
+This build plan incorporates the improvement plan as a required execution layer in the P06 pipeline. The original broad-first DAST flow is replaced by a route-aware, GraphCodeBERT-assisted planning stage that still preserves the strict correlation gate and target isolation rules.
+
+### Improvement objective
+
+The core problem is not only that ZAP is slow in absolute terms; it is that we spend early scan time on low-value routes and irrelevant rules. The improvement plan changes the scan ordering to:
+
+1. AST extracts every Flask/Express route, method, handler scope, and request parameter read.
+2. Semgrep identifies suspicious source locations and normalizes them to `UnifiedFinding` records.
+3. The planner maps each finding to the most likely route and parameter surface using deterministic route evidence.
+4. GraphCodeBERT is mandatory for ambiguous route/finding ranking and code-context enrichment; it is used to rank candidates, not to confirm or suppress vulnerabilities.
+5. The DAST planner selects the highest-priority route + rule pairs and builds a `ScanPlan`.
+6. ZAP executes targeted tests first, while the remaining time is reserved for broader coverage fallback.
+7. Correlation consumes alert evidence incrementally and continues to enforce the strict target + CWE + route + scope + parameter gate.
+
+This preserves the existing architecture constraints:
+- no cross-target correlation,
+- no model-driven authorization,
+- no weak correlation or route-only matching,
+- no rule scheduling without deterministic evidence,
+- no scanning outside the selected local target profile.
+
+### Mandatory GraphCodeBERT requirement
+
+GraphCodeBERT is not optional in this build plan. It is mandatory in shadow mode or advisory ranking mode, and it must be integrated into the planner flow before targeted ZAP execution. Its role is to improve ranking quality for ambiguous route/finding matches, but it must never:
+
+- create a route mapping on its own,
+- confirm a vulnerability,
+- suppress a finding,
+- or bypass the strict correlation gate.
+
+The planner remains deterministic-first. GraphCodeBERT is an advisory ranking layer on top of static evidence, not an authority layer.
+
+### Planner contract
+
+Add the following planning objects to the execution flow:
+
+- `ScanPlan`: target id, deadline, targeted task queue, broad task queue, planner version, plan status
+- `ScanTask`: route id, URL, method, parameter, ZAP rule id, phase, priority score, reason codes, execution status
+- `ScanEvent`: task started/completed, alert discovered, budget cutoff, scan finished
+
+These are additive contracts. The existing finding and correlation schemas remain the source of truth for final labels, but the planner adds explainability and execution ordering.
+
+### Time-budgeted ZAP orchestration
+
+The DAST engine should operate in two phases:
+
+- Phase A: targeted route + rule tests for high-confidence candidates
+- Phase B: broad coverage fallback, only if time remains
+
+Budget logic:
+- schedule targeted tasks first,
+- stop scheduling new tasks when the scan deadline is reached,
+- record coverage gaps and budget cutoff explicitly in the UI and API,
+- never let a model score bypass origin or target-boundary checks.
+
+### Required implementation sequence
+
+1. Deterministic route and finding evidence
+   - validate route inventory, methods, parameter reads, helper scopes
+   - normalize Semgrep findings with stable IDs and CWE metadata
+   - add exact-scope, helper-scope, unresolved mapping, and duplicate tests
+
+2. Planner and rule selection
+   - map findings to route + parameter + rule relevance
+   - implement deterministic priority classes and reason codes
+   - generate and serialize the plan for inspection
+
+3. Mandatory GraphCodeBERT enrichment
+   - pin the GraphCodeBERT model revision and preprocessing pipeline
+   - build focused function-level context windows and route/finding relevance pairs
+   - run in ranking-only mode and log model status separately from deterministic evidence
+
+4. ZAP orchestration
+   - verify selected target profile and local origin boundary
+   - execute targeted tasks first
+   - add deadline handling and broad-coverage fallback
+
+5. Incremental correlation
+   - normalize ZAP alerts as they arrive
+   - update findings incrementally without weakening the confirmation gate
+   - reconcile late-arriving evidence and duplicates
+
+6. UI and evaluation
+   - show planner reason codes, scan phase, task queue, time remaining, and budget cutoff
+   - display GraphCodeBERT status separately from deterministic evidence
+   - benchmark broad-first vs targeted-first under identical conditions
+
+### Safety and operational invariants
+
+The improvement plan keeps the same hard boundaries as the current build:
+- only the selected target profile is scanned,
+- all ZAP traffic stays within the approved local target origin,
+- target IDs are never mixed in a single result set,
+- planner output is advisory and never authoritative,
+- model inference remains local by default,
+- all route/rule tasks remain auditable and explainable.
+
+This makes the planning stage an optimization layer, not a new security decision component.
 
 ---
 
@@ -1688,9 +1791,9 @@ COMPLIANCE_MAP: dict[str, dict] = {
 
 ---
 
-## Key Decisions Log (v2.0 → v3.3)
+## Key Decisions Log (v2.0 → v3.4)
 
-| Decision | v2.0 | v3.0 | v3.3 |
+| Decision | v2.0 | v3.0 | v3.4 |
 |---|---|---|---|
 | Classification labels | T1/T2/T3/T4 | **Confirmed/Code only/Runtime only** | Aligned with official Problem 06 statement |
 | Label ranking | T1 first | **Confirmed first** — explicit Objective 03 requirement | Problem statement: "rank confirmed issues first" |
@@ -1701,8 +1804,9 @@ COMPLIANCE_MAP: dict[str, dict] = {
 | Containerisation | Docker Compose provided | **Hard requirement — all services containerised** | Problem statement: "containerized form" required |
 | AST-to-DAST matching | CWE + route text | — | Three passes resolve route prefixes, direct helper scopes, and exact read parameters; all four correlation checks must pass |
 | Target/language scope | Flask-only MVP | — | Add OWASP Juice Shop + Express/Node adapter behind shared route schema; isolate scans and findings by target profile |
+| DAST planning strategy | Broad-first scan | — | **Mandatory GraphCodeBERT-assisted planner + time-budgeted targeted ZAP execution** |
 
 ---
 
-*Build plan version: 3.3 — Mitigata Hackathon Problem 06 (Flagship)*
-*Updated: Added OWASP Juice Shop, Express/Node route adapter, target profiles, per-target scan fixtures and isolation, and dual-adapter tests; retained Flask as the reference demo target.*
+*Build plan version: 3.4 — Mitigata Hackathon Problem 06 (Flagship)*
+*Updated: Added the mandatory GraphCodeBERT planner layer, route-aware targeted DAST execution, time-budgeted broad-coverage fallback, and explicit scan plan/task/event contracts while preserving the strict correlation gate and per-target isolation.*

@@ -179,12 +179,32 @@ def run_semgrep(profile: dict) -> dict:
         "run",
         "--rm",
         "--no-deps",
-        "semgrep",
-        "scan",
-        "--json",
-        "--output",
-        "{report}",
     ]
+    ca_path = os.environ.get("MITIGATA_CA_CERT_PATH")
+    if ca_path:
+        trusted_ca = Path(ca_path).expanduser()
+        if not trusted_ca.is_file():
+            raise FileNotFoundError(
+                f"MITIGATA_CA_CERT_PATH must point to a readable CA certificate: {trusted_ca}"
+            )
+        command.extend(
+            [
+                "--volume",
+                f"{trusted_ca.resolve().as_posix()}:"
+                "/run/secrets/mitigata-ca.crt:ro",
+                "--env",
+                "REQUESTS_CA_BUNDLE=/run/secrets/mitigata-ca.crt",
+            ]
+        )
+    command.extend(
+        [
+            "semgrep",
+            "scan",
+            "--json",
+            "--output",
+            "{report}",
+        ]
+    )
     for config in profile.get("semgrep_configs", []):
         command.extend(["--config", str(config)])
     for excluded in profile.get("exclude", []):

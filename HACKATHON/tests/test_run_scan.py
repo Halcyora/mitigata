@@ -47,6 +47,7 @@ def test_run_semgrep_uses_container_and_persists_json_report(tmp_path, monkeypat
     def fake_run_compose(command):
         assert command[:5] == ["--profile", "scanners", "run", "--rm", "--no-deps"]
         assert "semgrep" in command
+        assert command[command.index("semgrep") + 1] == "scan"
         assert "--config" in command
         assert "/targets/vulnerable_flask/source" in command
         temporary_report = raw / Path(command[command.index("--output") + 1]).name
@@ -61,6 +62,52 @@ def test_run_semgrep_uses_container_and_persists_json_report(tmp_path, monkeypat
 
     assert report == {"results": [{"check_id": "test"}]}
     assert json.loads((raw / "flask_demo-semgrep.json").read_text()) == report
+
+
+def test_run_semgrep_mounts_optional_trusted_ca(tmp_path, monkeypatch):
+    root = tmp_path
+    targets = root / "targets"
+    source = targets / "vulnerable_flask" / "source"
+    source.mkdir(parents=True)
+    ca_path = root / "corporate-ca.crt"
+    ca_path.write_text("test certificate", encoding="utf-8")
+    raw = root / "data" / "raw"
+    monkeypatch.setattr(run_scan, "ROOT", root)
+    monkeypatch.setattr(run_scan, "TARGETS_DIR", targets)
+    monkeypatch.setattr(run_scan, "RAW_DIR", raw)
+    monkeypatch.setenv("MITIGATA_CA_CERT_PATH", str(ca_path))
+
+    def fake_run_compose(command):
+        volume_index = command.index("--volume")
+        assert command[volume_index + 1] == (
+            f"{ca_path.as_posix()}:/run/secrets/mitigata-ca.crt:ro"
+        )
+        env_index = command.index("--env")
+        assert command[env_index + 1] == (
+            "REQUESTS_CA_BUNDLE=/run/secrets/mitigata-ca.crt"
+        )
+        temporary_report = raw / Path(command[command.index("--output") + 1]).name
+        temporary_report.write_text(json.dumps({"results": []}))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(run_scan, "run_compose", fake_run_compose)
+
+    assert run_scan.run_semgrep(
+        _flask_profile("/targets/vulnerable_flask/source")
+    ) == {"results": []}
+
+
+def test_run_semgrep_rejects_missing_optional_ca(tmp_path, monkeypatch):
+    targets = tmp_path / "targets"
+    source = targets / "vulnerable_flask" / "source"
+    source.mkdir(parents=True)
+    monkeypatch.setattr(run_scan, "TARGETS_DIR", targets)
+    monkeypatch.setenv("MITIGATA_CA_CERT_PATH", str(tmp_path / "missing.crt"))
+
+    with pytest.raises(FileNotFoundError, match="MITIGATA_CA_CERT_PATH"):
+        run_scan.run_semgrep(
+            _flask_profile("/targets/vulnerable_flask/source")
+        )
 
 
 def test_run_dast_starts_only_profile_target_and_runs_zap(tmp_path, monkeypatch):

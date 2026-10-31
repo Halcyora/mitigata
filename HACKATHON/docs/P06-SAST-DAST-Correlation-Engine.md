@@ -5,7 +5,8 @@
 > Category: Application Security · AI/ML · Compliance Engineering  
 > Bonus Tier: **Flagship Challenge** — bonus points on top of normal score  
 > Real Incident Reference: **INC-06** — 2017 Credit Bureau Breach (~145 million records)  
-> PRD Reference: [P06-PRD.md](P06-PRD.md) — source of truth for all requirements
+> PRD Reference: [P06-PRD.md](P06-PRD.md) — source of truth for all requirements  
+> Architecture update: mandatory route-aware planner + GraphCodeBERT ranking + time-budgeted DAST
 
 ---
 
@@ -42,6 +43,8 @@ Neither tool alone is sufficient. Together, without a correlation layer, they pr
 
 - Scans source code (SAST) **and** the running application (DAST) in one unified pipeline
 - Covers at least **four of six vulnerability types** including SQL injection (CWE-89) and XSS (CWE-79), reported in one common format with CWE numbers
+- Uses a deterministic route-aware planner to schedule the most relevant DAST work before broad scan coverage
+- Applies **mandatory GraphCodeBERT ranking** to ambiguous route/finding candidates without weakening the evidence gate
 - Links each runtime finding to the code behind it and merges duplicates
 - Labels each issue as **Confirmed**, **Code only**, or **Runtime only** — ranking confirmed issues first
 - Generates verified remediation patches mapped to business and compliance risk
@@ -475,6 +478,8 @@ Violating these boundaries wastes time and **actively reduces your score**.
 | SAST Scanner | **Semgrep** (output: SARIF or JSON) |
 | DAST Scanner | **OWASP ZAP** (output: Alerts JSON) |
 | AST Parser | **Python `ast`** module or **tree-sitter** |
+| Route Planner | Deterministic route/finding planner with `ScanPlan`, `ScanTask`, and `ScanEvent` contracts |
+| Model Ranking | **GraphCodeBERT** (mandatory ranking layer for ambiguous route/finding candidates; advisory only) |
 | Agent Orchestration | **LangGraph** (stateful graph-based agent) |
 | Containerisation | **Docker + Docker Compose** (sandboxed target + all services) |
 | Frontend Graph | Any interactive graph library (e.g., React Flow, D3.js, Cytoscape.js) |
@@ -489,7 +494,19 @@ The demo repository must contain:
 - At least **3 unreachable vulnerable functions** (Code only candidates — dead code never called by any route)
 - At least **1 runtime config issue** (Runtime only candidate): missing security header or CORS misconfiguration
 
-### 7.3 Performance Requirements
+### 7.3 Mandatory Planner and GraphCodeBERT Gate
+
+The engine must include a route-aware DAST planner before runtime scanning begins. The planner is responsible for:
+
+- mapping Semgrep findings to route and parameter evidence,
+- ranking the most relevant route + rule pairs first,
+- creating a `ScanPlan` with targeted and broad coverage phases,
+- logging reason codes and budget cutoff events,
+- and preserving the strict correlation gate.
+
+**GraphCodeBERT is mandatory in this architecture.** It is used to rank ambiguous route/finding candidates and to enrich planner context, but it is not an authorization layer, a verification oracle, or a replacement for deterministic AST evidence. A model score cannot override the target, route, scope, parameter, or CWE checks required for a `Confirmed` match.
+
+### 7.4 Performance Requirements
 
 | Operation | Maximum Allowed Time |
 |---|---|
