@@ -1,10 +1,11 @@
 # P06 Architecture — SAST & DAST Correlation Engine
-## Complete System Design with Full Data Flow
+## Complete System Design with Mermaid Diagrams
 
 > **Mitigata Hackathon — Problem 06 · Flagship**  
 > Three Objectives: Scan Code+App · Correlate+Merge · Prioritise  
 > Real Incident: INC-06 — 2017 Credit Bureau Breach (~145M records)  
-> Architecture version: 1.0
+> PRD: [P06-PRD.md](P06-PRD.md) — source of truth  
+> Architecture version: 1.1 — aligned with official PRD (Anuj, 30 Oct 2026)
 
 ---
 
@@ -14,19 +15,19 @@
 2. [Container Architecture](#2-container-architecture)
 3. [End-to-End Data Flow](#3-end-to-end-data-flow)
 4. [Component Deep-Dives](#4-component-deep-dives)
-   - 4.1 [Ingestion Pipeline (Objective 01)](#41-ingestion-pipeline-objective-01)
-   - 4.2 [AST Route-to-Sink Mapper (Objective 02)](#42-ast-route-to-sink-mapper-objective-02)
-   - 4.3 [Correlation & Merge Engine (Objective 02)](#43-correlation--merge-engine-objective-02)
-   - 4.4 [LangGraph Verification Loop (Objective 02+03)](#44-langgraph-verification-loop-objective-0203)
-   - 4.5 [3-Label Classifier (Objective 03)](#45-3-label-classifier-objective-03)
-   - 4.6 [Patch Engine](#46-patch-engine)
+   - 4.1 [Ingestion Pipeline — FR-1, FR-2, FR-3](#41-ingestion-pipeline--fr-1-fr-2-fr-3)
+   - 4.2 [AST Route-to-Sink Mapper — FR-4](#42-ast-route-to-sink-mapper--fr-4)
+   - 4.3 [Correlation & Merge Engine — FR-5, FR-6](#43-correlation--merge-engine--fr-5-fr-6)
+   - 4.4 [LangGraph Verification Loop — B-1](#44-langgraph-verification-loop--b-1)
+   - 4.5 [3-Label Classifier — FR-7, FR-9](#45-3-label-classifier--fr-7-fr-9)
+   - 4.6 [Patch Engine — B-4](#46-patch-engine--b-4)
    - 4.7 [Compliance Translator](#47-compliance-translator)
-   - 4.8 [FastAPI Engine Layer](#48-fastapi-engine-layer)
-   - 4.9 [React Frontend](#49-react-frontend)
+   - 4.8 [FastAPI Engine Layer — FR-10](#48-fastapi-engine-layer--fr-10)
+   - 4.9 [React Frontend — FR-8, FR-9](#49-react-frontend--fr-8-fr-9)
 5. [Network Topology](#5-network-topology)
 6. [Data Schemas](#6-data-schemas)
 7. [API Contract](#7-api-contract)
-8. [Security Boundaries](#8-security-boundaries)
+8. [Answer Key Mapping](#8-answer-key-mapping)
 9. [Performance Budget](#9-performance-budget)
 10. [Dependency Graph](#10-dependency-graph)
 
@@ -34,102 +35,90 @@
 
 ## 1. System Overview
 
-```
-╔══════════════════════════════════════════════════════════════════════════════════╗
-║              PROBLEM 06 — SAST & DAST CORRELATION ENGINE                        ║
-║                                                                                  ║
-║  OBJECTIVE 01: Scan Code + App                                                   ║
-║  ┌─────────────────────────────────────────────────────────────────────────┐     ║
-║  │  Semgrep (SAST)         OWASP ZAP (DAST)                                │     ║
-║  │  ├─ CWE-89 (SQLi) ✅    ├─ CWE-89 (SQLi) ✅                            │     ║
-║  │  ├─ CWE-79 (XSS)  ✅    ├─ CWE-79 (XSS)  ✅                            │     ║
-║  │  ├─ CWE-94 (SSTI)       ├─ CWE-94 (SSTI)                               │     ║
-║  │  ├─ CWE-347 (JWT)       └─ CWE-347 (JWT)                               │     ║
-║  │  ├─ CWE-502 (Pickle)                                                    │     ║
-║  │  └─ CWE-78 (CMDi)                                                       │     ║
-║  │            ↓                      ↓                                     │     ║
-║  │     UnifiedFinding[]        UnifiedFinding[]   ← one common format      │     ║
-║  └─────────────────────────────────────────────────────────────────────────┘     ║
-║                              ↓                                                   ║
-║  OBJECTIVE 02: Correlate + Merge                                                 ║
-║  ┌─────────────────────────────────────────────────────────────────────────┐     ║
-║  │  AST Call Graph (Python ast)                                            │     ║
-║  │  Route → Controller → Sink (deterministic, no LLM)                     │     ║
-║  │                              ↓                                          │     ║
-║  │  Correlation & Merge Engine                                             │     ║
-║  │  CWE join + route URL match → single merged record per vulnerability    │     ║
-║  │                              ↓                                          │     ║
-║  │  LangGraph Verification Loop (stateful agent)                           │     ║
-║  │  Code only finding → probe → evidence → Confirmed                       │     ║
-║  └─────────────────────────────────────────────────────────────────────────┘     ║
-║                              ↓                                                   ║
-║  OBJECTIVE 03: Prioritise What to Fix                                            ║
-║  ┌─────────────────────────────────────────────────────────────────────────┐     ║
-║  │  🔴 Confirmed    (Rank 1) — SAST + DAST both match — fix immediately    │     ║
-║  │  🟡 Code only   (Rank 2) — SAST only — review / suppress if dead code  │     ║
-║  │  🟠 Runtime only (Rank 3) — DAST only — investigate configuration      │     ║
-║  │                              ↓                                          │     ║
-║  │  Auto-Patch (GPT-4o → template) + Re-verify + Compliance Report        │     ║
-║  └─────────────────────────────────────────────────────────────────────────┘     ║
-╚══════════════════════════════════════════════════════════════════════════════════╝
+```mermaid
+flowchart TD
+    subgraph OBJ1["🎯 Objective 01 — Scan Code + App (FR-1, FR-2, FR-3)"]
+        SAST["Semgrep SAST\nCWE-89 ✅ CWE-79 ✅\nCWE-78 · CWE-798\nCWE-22 · CWE-601"]
+        DAST["OWASP ZAP DAST\nCWE-89 ✅ CWE-79 ✅\nCWE-78 · CWE-601\nRuntime only findings"]
+        UF["UnifiedFinding[]\none common format\ncwe_id mandatory"]
+        SAST --> UF
+        DAST --> UF
+    end
+
+    subgraph OBJ2["🎯 Objective 02 — Correlate + Merge (FR-4, FR-5, FR-6)"]
+        AST["AST Route-to-Sink Mapper\nFR-4: URL → function → lines\nPython ast · BFS call graph\nDeterministic — no LLM"]
+        CORR["Correlation & Merge Engine\nFR-5: CWE + route join\nFR-6: deduplicate\neach vulnerability once"]
+        LG["LangGraph Verification\nB-1: Code only → Confirmed\nstateful probe loop\ninternal Docker network"]
+        UF --> AST
+        AST --> CORR
+        CORR --> LG
+    end
+
+    subgraph OBJ3["🎯 Objective 03 — Prioritise (FR-7, FR-8, FR-9)"]
+        CLS["3-Label Classifier\nConfirmed 🔴 Rank 1\nCode only 🟡 Rank 2\nRuntime only 🟠 Rank 3"]
+        PATCH["Patch Engine B-4\nGPT-4o → template\ngit diff + re-verify"]
+        COMP["Compliance Translator\nINR exposure · RBI · SEBI\nISO 27001 · DPDP 2023\nINC-06 reference"]
+        LG --> CLS
+        CLS --> PATCH
+        CLS --> COMP
+    end
+
+    subgraph UI["🖥️ Correlation Workbench (FR-8, FR-9, FR-10)"]
+        GRAPH["Attack Path Graph\nReact Flow + ELK\nConfirmed nodes first"]
+        DETAIL["Finding Detail Panel\nURL + param + payload\nfile + line + CWE\ncode snippet"]
+        RISK["Business Risk Panel\n₹ exposure · 4 frameworks\ncyber insurance flag"]
+        CLS --> GRAPH
+        PATCH --> DETAIL
+        COMP --> RISK
+    end
+
+    style OBJ1 fill:#1e3a5f,color:#fff
+    style OBJ2 fill:#1e4a3f,color:#fff
+    style OBJ3 fill:#3a1e4a,color:#fff
+    style UI fill:#3a3a1e,color:#fff
 ```
 
 ---
 
 ## 2. Container Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                         HOST MACHINE (Developer / Demo)                         │
-│                                                                                 │
-│   Browser ──► http://localhost:3000   (Correlation Workbench UI)                │
-│   curl    ──► http://localhost:8000   (Engine API + Swagger docs)               │
-│                                                                                 │
-│  ┌──────────────────────────────────────────────────────────────────────────┐   │
-│  │                    DOCKER COMPOSE NETWORK                                │   │
-│  │                                                                          │   │
-│  │  ┌──────────────────────────────────────────────────────────────────┐   │   │
-│  │  │                    PUBLIC NETWORK                                 │   │   │
-│  │  │                                                                   │   │   │
-│  │  │  ┌─────────────────────────┐    ┌──────────────────────────────┐ │   │   │
-│  │  │  │   mitigata-frontend     │    │      mitigata-engine         │ │   │   │
-│  │  │  │   React + Vite          │    │      FastAPI (Python)        │ │   │   │
-│  │  │  │   Port: 3000            │◄──►│      Port: 8000              │ │   │   │
-│  │  │  │                         │    │                              │ │   │   │
-│  │  │  │  CorrelationGraph.tsx   │    │  /api/graph    (GET)         │ │   │   │
-│  │  │  │  FindingDetailPanel.tsx │    │  /api/verify   (POST+SSE)    │ │   │   │
-│  │  │  │  BusinessRiskPanel.tsx  │    │  /api/patch    (POST)        │ │   │   │
-│  │  │  │  ReTestButton.tsx       │    │  /api/compliance (GET)       │ │   │   │
-│  │  │  └─────────────────────────┘    └──────────────┬───────────────┘ │   │   │
-│  │  └──────────────────────────────────────────────── │ ───────────────┘   │   │
-│  │                                                     │                    │   │
-│  │  ┌──────────────────────────────────────────────── │ ───────────────┐   │   │
-│  │  │                    INTERNAL NETWORK             │                 │   │   │
-│  │  │                    (internal: true)             │                 │   │   │
-│  │  │                                                 ▼                 │   │   │
-│  │  │                              ┌──────────────────────────────────┐ │   │   │
-│  │  │                              │      mitigata-target             │ │   │   │
-│  │  │                              │  we45/Vulnerable-Flask-App       │ │   │   │
-│  │  │                              │  Port: 5050 (internal only)      │ │   │   │
-│  │  │                              │                                  │ │   │   │
-│  │  │                              │  Routes:                         │ │   │   │
-│  │  │                              │  POST /login       (CWE-347)     │ │   │   │
-│  │  │                              │  POST /register/user (CWE-916)   │ │   │   │
-│  │  │                              │  POST /fetch/customer (CWE-347)  │ │   │   │
-│  │  │                              │  GET  /           (CWE-200)      │ │   │   │
-│  │  │                              │  404 handler      (CWE-94)       │ │   │   │
-│  │  │                              └──────────────────────────────────┘ │   │   │
-│  │  └──────────────────────────────────────────────────────────────────┘   │   │
-│  │                                                                          │   │
-│  │  Volumes:                                                                │   │
-│  │  ./target-app ──► /target-src (read-only) ── engine AST mapper          │   │
-│  │  ./data       ──► /app/data              ── pre-seeded scan results      │   │
-│  └──────────────────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph HOST["🖥️ Host Machine"]
+        BROWSER["Browser :3000"]
+        CURL["curl :8000"]
+        BLOCKED["curl :5050 ❌ BLOCKED"]
+    end
 
-⚠️  SECURITY: mitigata-target is ONLY reachable from mitigata-engine via
-    the internal Docker network. No direct host access. No external probes.
+    subgraph PUBLIC["Docker Network: public"]
+        FE["mitigata-frontend\nReact + Vite\n:3000"]
+        ENG["mitigata-engine\nFastAPI Python\n:8000\n/api/graph\n/api/verify\n/api/patch\n/api/compliance"]
+    end
+
+    subgraph INTERNAL["Docker Network: internal (internal: true)"]
+        TARGET["mitigata-target\nwe45/Vulnerable-Flask-App\n:5050 — internal only\nPOST /login CWE-347\nPOST /register CWE-916\n404 handler CWE-94"]
+    end
+
+    subgraph VOLUMES["Volumes"]
+        SRC["./target-app → /target-src :ro\nAST mapper reads exact running source"]
+        DATA["./data → /app/data\npre-seeded scan results"]
+    end
+
+    BROWSER --> FE
+    CURL --> ENG
+    BLOCKED -. "blocked" .-> TARGET
+    FE <--> ENG
+    ENG --> TARGET
+    ENG --- SRC
+    ENG --- DATA
+
+    style INTERNAL fill:#2d1515,color:#fff
+    style PUBLIC fill:#152d15,color:#fff
+    style HOST fill:#15152d,color:#fff
+    style VOLUMES fill:#2d2d15,color:#fff
 ```
+
+> **Security invariant:** `mitigata-target` is reachable **only** from `mitigata-engine` via the internal Docker network. All LangGraph probes route through the engine. No external traffic ever leaves the Docker network.
 
 ---
 
@@ -137,1055 +126,789 @@
 
 ### 3.1 Full Pipeline — Startup to Classified Findings
 
-```
-┌──────────────────────────────────────────────────────────────────────────────────┐
-│                    FULL DATA FLOW — PROBLEM 06                                   │
-│                                                                                  │
-│  ① STARTUP (docker compose up --build)                                           │
-│  ─────────────────────────────────────                                           │
-│  target container starts → healthcheck passes                                    │
-│  engine container starts → reads pre-seeded data/semgrep-results.json           │
-│                          → reads pre-seeded data/zap-alerts.json                │
-│                          → mounts ./target-app as /target-src (read-only)       │
-│  frontend container starts → connects to engine at :8000                        │
-│                                                                                  │
-│  ② INGESTION (Objective 01 — one common format with CWE numbers)                │
-│  ─────────────────────────────────────────────────────────────────               │
-│  semgrep_parser.py                                                               │
-│    reads data/semgrep-results.json                                               │
-│    extracts: file, line, rule_id, CWE from metadata                             │
-│    outputs: UnifiedFinding(source="sast", cwe_id="CWE-89", ...)                 │
-│                                                                                  │
-│  zap_parser.py                                                                   │
-│    reads data/zap-alerts.json                                                    │
-│    extracts: url, method, parameter, evidence, cweid                            │
-│    outputs: UnifiedFinding(source="dast", cwe_id="CWE-89", ...)                 │
-│                                                                                  │
-│  Result: sast_findings[] + dast_findings[]  (both in UnifiedFinding format)     │
-│                                                                                  │
-│  ③ AST ANALYSIS (Objective 02 — deterministic linkage)                          │
-│  ──────────────────────────────────────────────────────                          │
-│  route_extractor.py                                                              │
-│    walks /target-src/*.py (read-only volume mount)                               │
-│    finds: @app.route, @app.post, @app.errorhandler, etc.                        │
-│    outputs: routes[] = [{file, function, route, methods, line}]                 │
-│                                                                                  │
-│  sink_detector.py                                                                │
-│    walks each FunctionDef AST node                                               │
-│    matches: .execute(tainted), render_template_string, pickle.loads,            │
-│             jwt.decode(verify=False), hashlib.md5, eval(), os.popen()           │
-│    outputs: sinks[] = [{file, line, sink_type, function}]                       │
-│                                                                                  │
-│  call_graph.py (BFS)                                                             │
-│    for each route handler → BFS through call edges → set of reachable functions │
-│    for each sink → check if any route reaches its containing function           │
-│    outputs:                                                                      │
-│      reachable_sinks[]   → linked to routes (Objective 02 linkage)             │
-│      unreachable_sinks[] → dead code (Code only, suppress)                     │
-│      stats.suppression_ratio ≥ 0.70                                             │
-│                                                                                  │
-│  merger.py                                                                       │
-│    enriches each SAST finding with: reachable=True/False, routes=[]             │
-│                                                                                  │
-│  ④ CORRELATION & MERGE (Objective 02 — each vulnerability appears once)         │
-│  ───────────────────────────────────────────────────────────────────────         │
-│  correlator.py                                                                   │
-│    for each SAST finding:                                                        │
-│      find DAST findings with same cwe_id                                        │
-│      if DAST URL path ∈ SAST finding's routes → MERGE → "Confirmed"            │
-│      elif CWE match only → MERGE → "Confirmed" (lower confidence)               │
-│      else → keep as "Code only"                                                  │
-│    remaining DAST findings → "Runtime only"                                     │
-│    sort: Confirmed first, then Code only, then Runtime only                     │
-│    outputs: merged_findings[] (deduplicated, labelled, ranked)                  │
-│                                                                                  │
-│  ⑤ CLASSIFICATION (Objective 03 — label + rank)                                 │
-│  ─────────────────────────────────────────────                                   │
-│  classifier.py                                                                   │
-│    applies classification rules in priority order                                │
-│    assigns: label, confidence (0.0–1.0), reason                                 │
-│    enforces: Confirmed always rank 1                                             │
-│                                                                                  │
-│  ⑥ GRAPH BUILD & LAYOUT                                                          │
-│  ────────────────────                                                            │
-│  engine/api/main.py  GET /api/graph                                             │
-│    builds node graph from merged_findings                                        │
-│    computes ELK layout (x, y positions)                                         │
-│    returns: {nodes[], edges[], stats{}}                                          │
-│                                                                                  │
-│  ⑦ UI RENDER                                                                     │
-│  ───────────                                                                     │
-│  React frontend fetches /api/graph                                               │
-│  React Flow renders attack path graph                                            │
-│  Split-screen: graph (left) | detail panel (right)                              │
-│  Confirmed findings rendered first with red badges                               │
-│  Stats bar: total · confirmed · suppression_ratio · cwe_types_covered           │
-│                                                                                  │
-└──────────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+sequenceDiagram
+    participant DC as docker compose up
+    participant T as mitigata-target :5050
+    participant E as mitigata-engine :8000
+    participant FE as mitigata-frontend :3000
+    participant B as Browser
+
+    DC->>T: start container
+    T-->>DC: healthcheck passes
+    DC->>E: start container (depends_on target healthy)
+    E->>E: load data/semgrep-results.json (FR-1)
+    E->>E: load data/zap-alerts.json (FR-2)
+    E->>E: mount /target-src:ro (AST mapper)
+    DC->>FE: start container
+    FE-->>DC: ready :3000
+
+    B->>FE: GET http://localhost:3000
+    FE->>E: GET /api/graph
+    E->>E: semgrep_parser → UnifiedFinding[] (FR-3)
+    E->>E: zap_parser → UnifiedFinding[] (FR-3)
+    E->>E: route_extractor → routes[] (FR-4)
+    E->>E: call_graph BFS → reachable/unreachable sinks (FR-4)
+    E->>E: merger → enrich SAST with reachability (B-2)
+    E->>E: correlate_and_merge → merged findings (FR-5, FR-6)
+    E->>E: classifier → Confirmed/Code only/Runtime only (FR-7)
+    E->>E: ELK layout → node positions
+    E-->>FE: GraphResponse {nodes, edges, stats}
+    FE-->>B: Correlation Workbench rendered ≤3s (FR-9)
 ```
 
-### 3.2 Live Verification Flow (LangGraph — Objective 02+03)
+### 3.2 Live Verification Flow — B-1 (Code only → Confirmed)
 
-```
-User clicks "Verify" on a "Code only" finding
-             │
-             ▼
-POST /api/verify/{finding_id}  (Engine FastAPI)
-             │
-             ▼
-┌────────────────────────────────────────────────────────────────────────────┐
-│                    LANGGRAPH STATE MACHINE                                 │
-│                                                                            │
-│  AlertState {                                                              │
-│    finding_id, route, method, parameter, sink_type,                       │
-│    probe_payload, probe_variant=0,                                         │
-│    label="UNVERIFIED", probe_history=[]                                    │
-│  }                                                                         │
-│                                                                            │
-│  ┌─────────────────┐                                                       │
-│  │  probe_generator │  ← selects canary payload by sink_type + variant    │
-│  │                  │    e.g. sink="ssti" → payload="{{7*7}}"             │
-│  └────────┬─────────┘                                                      │
-│           │  state.probe_payload = "{{7*7}}"                              │
-│           ▼                                                                │
-│  ┌─────────────────┐                                                       │
-│  │ runtime_executor │  ← fires HTTP probe at mitigata-target:5050         │
-│  │                  │    via internal Docker network ONLY                  │
-│  │  httpx.request(  │    timeout=2.0s hard limit                          │
-│  │    method=POST,  │    records: status, response[:500], probe_history   │
-│  │    url=target/   │                                                      │
-│  │    route,        │                                                      │
-│  │    json={param:  │                                                      │
-│  │    payload},     │                                                      │
-│  │    timeout=2.0)  │                                                      │
-│  └────────┬─────────┘                                                      │
-│           │  state.http_response = "...49..." (SSTI evaluated {{7*7}})   │
-│           ▼                                                                │
-│  ┌──────────────────────┐                                                  │
-│  │  response_evaluator  │  ← checks response for EVIDENCE_SIGNALS        │
-│  │                      │    ssti signals: ["49", "Jinja2", "{{"]        │
-│  │  "49" found in resp  │    found=["49"] → label="Confirmed"            │
-│  └────────┬─────────────┘                                                  │
-│           │                                                                │
-│    ┌──────┴──────────┐                                                     │
-│    │                 │                                                     │
-│  Evidence          No evidence                                             │
-│  found             found                                                   │
-│    │                 │                                                     │
-│    │             probe_variant==0?                                         │
-│    │                 │                                                     │
-│    │           ┌─────┴──────┐                                             │
-│    │           │            │                                             │
-│    │         Yes           No                                             │
-│    │           │            │                                             │
-│    │    ┌──────────────┐   END (Code only)                                │
-│    │    │retry_evaluator│                                                  │
-│    │    │ variant += 1  │                                                  │
-│    │    └──────┬────────┘                                                  │
-│    │           │ loops back to probe_generator                             │
-│    │           │ with variant payload "${7*7}"                             │
-│    │           ▼ (second attempt)                                          │
-│    │    [probe_generator → runtime_executor → response_evaluator]         │
-│    │                                                                       │
-│    ▼                                                                       │
-│  label = "Confirmed"                                                       │
-│  evidence = "Response contained: ['49']"                                   │
-│                                                                            │
-└────────────────────────────────────────────────────────────────────────────┘
-             │
-             ▼
-SSE stream → frontend EventSource
-             │
-             ▼
-Label badge flips: 🟡 "Code only" → 🔴 "Confirmed" (live in UI)
-Finding re-sorted to Rank 1 position
-probe_history panel shows both probe attempts
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant FE as Frontend
+    participant E as Engine
+    participant LG as LangGraph
+    participant T as Target :5050
+
+    U->>FE: click "Verify" on Code only finding
+    FE->>E: POST /api/verify/{finding_id}
+    E->>LG: invoke verification_graph(AlertState)
+
+    Note over LG: probe_generator node
+    LG->>LG: select payload by sink_type + variant=0
+    Note right of LG: ssti → "{{7*7}}"
+
+    Note over LG: runtime_executor node
+    LG->>T: httpx.request(POST /nonexistent, timeout=2.0s)
+    T-->>LG: HTTP 404, body contains "49"
+
+    Note over LG: response_evaluator node
+    LG->>LG: check EVIDENCE_SIGNALS["ssti"] = ["49","Jinja2"]
+    LG->>LG: "49" found → label = "Confirmed"
+
+    LG-->>E: AlertState{label="Confirmed", evidence="['49']"}
+    E-->>FE: SSE event {label:"Confirmed", done:true}
+    FE-->>U: badge flips 🟡 Code only → 🔴 Confirmed (live)
+    FE-->>U: finding re-sorted to Rank 1 position
 ```
 
-### 3.3 Auto-Remediation Flow
+### 3.3 Conditional Retry Flow
 
+```mermaid
+flowchart TD
+    START([Code only Finding]) --> PG[probe_generator\nvariant=0\npayload={{7*7}}]
+    PG --> RE[runtime_executor\nhttpx timeout=2.0s]
+    RE --> EV[response_evaluator\ncheck EVIDENCE_SIGNALS]
+
+    EV --> DEC{Evidence\nfound?}
+    DEC -->|Yes| CONFIRMED([🔴 Confirmed\nlabel updated\nSSE → UI])
+    DEC -->|No, variant==0| RETRY[retry_evaluator\nvariant += 1]
+    DEC -->|No, variant==1| CODEONLY([🟡 Code only\nprobe inconclusive])
+
+    RETRY --> PG2[probe_generator\nvariant=1\npayload=$7*7}]
+    PG2 --> RE2[runtime_executor\nsecond attempt]
+    RE2 --> EV2[response_evaluator]
+    EV2 -->|Evidence| CONFIRMED
+    EV2 -->|No evidence| CODEONLY
+
+    style CONFIRMED fill:#dc2626,color:#fff
+    style CODEONLY fill:#ca8a04,color:#fff
 ```
-User clicks "Auto-Remediate" on a Confirmed finding
-             │
-             ▼
-POST /api/patch/{finding_id}  (Engine FastAPI)
-             │
-             ▼
-┌────────────────────────────────────────────────────────────────────────────┐
-│                    PATCH ENGINE                                            │
-│                                                                            │
-│  1. Read code context from /target-src (read-only volume mount)           │
-│     lines [max(0, line-5) : line+5] around the vulnerable sink            │
-│                                                                            │
-│  2. Try Azure OpenAI GPT-4o (primary)                                     │
-│     POST https://{endpoint}/openai/deployments/gpt-4o/chat/completions    │
-│     system: "Generate minimal unified diff to fix {sink_type}..."         │
-│     user:   "File: {file}, Line: {line}\n```python\n{context}\n```"       │
-│     timeout: 10s                                                           │
-│     ↓                                                                      │
-│     If response starts with "---" or "@@" → valid diff → use it          │
-│                                                                            │
-│  3. Try Azure OpenAI GPT-4o-mini (fallback)                               │
-│     Same prompt, faster/cheaper model                                      │
-│                                                                            │
-│  4. Deterministic template patch (zero-cost fallback)                     │
-│     PATCH_TEMPLATES["sql_injection"] → hardcoded parameterised query fix  │
-│     Demo never breaks regardless of Azure availability                    │
-│                                                                            │
-└────────────────────────────────────────────────────────────────────────────┘
-             │
-             ▼  patch_result = {patch: "--- a/app.py\n+++ ...", source: "llm_gpt4o"}
-             │
-             ▼
-UI shows Git diff preview (unified diff format)
-             │
-User clicks "Apply"
-             │
-             ▼
-POST /api/patch/{finding_id}/apply
-             │
-             ▼
-┌────────────────────────────────────────────────────────────────────────────┐
-│  git apply --check {patch_file}   ← dry-run validation first              │
-│  git apply {patch_file}           ← apply to /target-src                  │
-│  (target container auto-reloads if Flask debug=True)                      │
-└────────────────────────────────────────────────────────────────────────────┘
-             │
-             ▼
-RE-VERIFICATION: same LangGraph probe fires again
-             │
-             ├─► Probe blocked (no evidence signals) → ✅ "Fix Verified"
-             └─► Probe succeeds (evidence found)     → ❌ "Fix Insufficient"
+
+### 3.4 Auto-Remediation Flow — B-4
+
+```mermaid
+flowchart LR
+    SEL([User selects\nConfirmed finding]) --> CTX[Read code context\n/target-src line±5]
+    CTX --> GPT4O{Azure GPT-4o\navailable?}
+    GPT4O -->|Yes| LLM[GPT-4o generates\nunified diff\ntemp=0 · 10s timeout]
+    GPT4O -->|No| MINI{GPT-4o-mini\navailable?}
+    MINI -->|Yes| LLM
+    MINI -->|No| TPL[Template patch\nfrom PATCH_TEMPLATES\nzero cost · always works]
+
+    LLM --> VALID{Starts with\n--- or @@?}
+    VALID -->|Yes| DIFF[Show Git diff\npreview in UI]
+    VALID -->|No| TPL
+    TPL --> DIFF
+
+    DIFF --> APPLY[User clicks Apply\ngit apply --check\ngit apply]
+    APPLY --> REVERIFY[Re-run same\nLangGraph probe]
+    REVERIFY --> RESULT{Probe\nblocked?}
+    RESULT -->|Yes| FIXED([✅ Fix Verified\nVulnerability Closed])
+    RESULT -->|No| INSUFF([❌ Fix Insufficient\nRe-patch Required])
+
+    style FIXED fill:#16a34a,color:#fff
+    style INSUFF fill:#dc2626,color:#fff
 ```
 
 ---
 
 ## 4. Component Deep-Dives
 
-### 4.1 Ingestion Pipeline (Objective 01)
+### 4.1 Ingestion Pipeline — FR-1, FR-2, FR-3
 
-```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                    INGESTION PIPELINE                                        │
-│                    (Objective 01: one common format, CWE numbers)            │
-│                                                                              │
-│  INPUT A: data/semgrep-results.json                                         │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  {                                                                   │    │
-│  │    "results": [{                                                     │    │
-│  │      "check_id": "python.flask.security.audit.render-template-string"│    │
-│  │      "path": "app/app.py",                                          │    │
-│  │      "start": {"line": 89},                                         │    │
-│  │      "extra": {                                                      │    │
-│  │        "severity": "ERROR",                                         │    │
-│  │        "metadata": {"cwe": ["CWE-94: Improper Neutralization..."]}  │    │
-│  │      }                                                               │    │
-│  │    }]                                                                │    │
-│  │  }                                                                   │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                    │                                                         │
-│                    ▼  semgrep_parser.py                                      │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  UnifiedFinding(                                                     │    │
-│  │    source="sast",                                                    │    │
-│  │    cwe_id="CWE-94",          ← normalised from "CWE-94: Improper..."│    │
-│  │    file="app/app.py",                                               │    │
-│  │    line=89,                                                          │    │
-│  │    rule_id="python.flask.security.audit.render-template-string",    │    │
-│  │    severity="ERROR",                                                 │    │
-│  │    sink_type="ssti",                                                 │    │
-│  │    label="Code only",        ← default, overridden by correlator    │    │
-│  │  )                                                                   │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-│  INPUT B: data/zap-alerts.json                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  {                                                                   │    │
-│  │    "alerts": [{                                                      │    │
-│  │      "cweid": "94",                                                  │    │
-│  │      "url": "http://target:5050/nonexistent",                       │    │
-│  │      "method": "GET",                                                │    │
-│  │      "param": "url",                                                 │    │
-│  │      "evidence": "{{7*7}}",                                         │    │
-│  │      "riskdesc": "High (High)"                                       │    │
-│  │    }]                                                                │    │
-│  │  }                                                                   │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                    │                                                         │
-│                    ▼  zap_parser.py                                          │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  UnifiedFinding(                                                     │    │
-│  │    source="dast",                                                    │    │
-│  │    cwe_id="CWE-94",          ← normalised from cweid: "94"          │    │
-│  │    url="http://target:5050/nonexistent",                             │    │
-│  │    method="GET",                                                     │    │
-│  │    parameter="url",                                                  │    │
-│  │    evidence="{{7*7}}",                                               │    │
-│  │    severity="HIGH",                                                  │    │
-│  │    sink_type="ssti",                                                 │    │
-│  │    label="Runtime only",     ← default, overridden by correlator    │    │
-│  │  )                                                                   │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-│  COVERAGE VERIFICATION (Objective 01):                                      │
-│  CWE types in corpus: {CWE-89, CWE-79, CWE-94, CWE-347, CWE-502, CWE-78}  │
-│  Mandatory: CWE-89 ✅  CWE-79 ✅  (4+ total ✅)                             │
-└──────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    subgraph SAST_IN["FR-1: SAST Input"]
+        SJ["data/semgrep-results.json\ncheck_id · path · line\nmetadata.cwe · severity"]
+    end
+
+    subgraph DAST_IN["FR-2: DAST Input"]
+        ZJ["data/zap-alerts.json\ncweid · url · method\nparam · evidence · riskdesc"]
+    end
+
+    subgraph PARSE["FR-3: Normalise to Common Format"]
+        SP["semgrep_parser.py\nextract CWE from metadata\nmap rule_id → CWE\nlabel = Code only"]
+        ZP["zap_parser.py\nnormalise cweid → CWE-N\nnormalise riskdesc → severity\nlabel = Runtime only"]
+    end
+
+    subgraph OUT["UnifiedFinding (common format)"]
+        UF["id · source · cwe_id ← shared key\nlabel · file · line · function\nurl · method · parameter\nevidence · severity · merged_from"]
+    end
+
+    subgraph COV["Objective 01 Coverage Check"]
+        CHECK["CWE-89 SQLi ✅ mandatory\nCWE-79 XSS ✅ mandatory\nCWE-78 CMDi\nCWE-22 Path Traversal\nCWE-601 Open Redirect\nCWE-798 Hardcoded Secrets\n≥ 4 of 6 required"]
+    end
+
+    SJ --> SP --> UF
+    ZJ --> ZP --> UF
+    UF --> CHECK
 ```
 
-### 4.2 AST Route-to-Sink Mapper (Objective 02)
+### 4.2 AST Route-to-Sink Mapper — FR-4
 
-```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                    AST ROUTE-TO-SINK MAPPER                                  │
-│                    (Objective 02: deterministic linkage, no LLM)             │
-│                                                                              │
-│  SOURCE: /target-src/app/app.py  (read-only volume mount)                   │
-│                                                                              │
-│  STEP 1: Parse Python AST                                                   │
-│  ─────────────────────────                                                   │
-│  tree = ast.parse(open("app/app.py").read())                                │
-│                                                                              │
-│  STEP 2: Extract route decorators                                           │
-│  ─────────────────────────────────                                           │
-│                                                                              │
-│  app.py (simplified):                                                       │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  @app.route('/login', methods=['POST'])     ← ROUTE DECORATOR       │   │
-│  │  def login():                               ← HANDLER FUNCTION      │   │
-│  │      ...                                                             │   │
-│  │      token = jwt.encode(                   ← SINK (CWE-347)         │   │
-│  │          payload, app.config['SECRET_KEY_HMAC'])                    │   │
-│  │                                                                      │   │
-│  │  @app.errorhandler(404)                    ← ROUTE DECORATOR        │   │
-│  │  def pnf(e):                               ← HANDLER FUNCTION      │   │
-│  │      template = "...%s..." % request.url                            │   │
-│  │      return render_template_string(template)  ← SINK (CWE-94)      │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                              │
-│  routes = [                                                                 │
-│    {function: "login",  route: "/login",       methods: ["POST"]},         │
-│    {function: "pnf",    route: "__error_404__", methods: ["GET"]},         │
-│    ...                                                                      │
-│  ]                                                                          │
-│                                                                              │
-│  STEP 3: Build call edges                                                   │
-│  ──────────────────────────                                                  │
-│  call_edges = {                                                             │
-│    "login":    {"jwt.encode", "authenticate_user", ...},                   │
-│    "pnf":      {"render_template_string"},                                  │
-│    ...                                                                      │
-│  }                                                                          │
-│                                                                              │
-│  STEP 4: BFS reachability from each route handler                          │
-│  ─────────────────────────────────────────────────                          │
-│  reachable_from_login = BFS("login", call_edges)                           │
-│    = {"login", "jwt.encode", "authenticate_user", ...}                     │
-│                                                                              │
-│  STEP 5: Match sinks to reachable functions                                │
-│  ──────────────────────────────────────────                                 │
-│                                                                              │
-│  Sink: render_template_string at app.py:89 in function pnf()               │
-│    → pnf() ∈ reachable_from_pnf ✅                                         │
-│    → reachable_sinks: [{file: "app.py", line: 89, sink: "ssti",           │
-│                          reachable_from_routes: ["__error_404__"]}]        │
-│                                                                              │
-│  Sink: pickle.loads at dead_code_helpers.py:18 in _legacy_deserialise()   │
-│    → _legacy_deserialise() ∉ any route's reachable set                     │
-│    → unreachable_sinks: [{file: "dead_code_helpers.py", line: 18, ...}]   │
-│                                                                              │
-│  STEP 6: Compute suppression ratio                                         │
-│  ────────────────────────────────                                           │
-│  total = 11, unreachable = 7                                               │
-│  suppression_ratio = 7/11 = 0.636  (add 1 more dead fn → 8/12 = 0.667)   │
-│                                                                              │
-│  CALL GRAPH OUTPUT:                                                         │
-│  {                                                                          │
-│    "routes": [...],                                                         │
-│    "sinks": [/* reachable sinks with routes */],                           │
-│    "unreachable_sinks": [/* dead code */],                                 │
-│    "stats": {                                                               │
-│      "total_sinks": 12,                                                    │
-│      "reachable": 4,                                                       │
-│      "unreachable": 8,                                                     │
-│      "suppression_ratio": 0.667                                            │
-│    }                                                                        │
-│  }                                                                          │
-└──────────────────────────────────────────────────────────────────────────────┘
+FR-4 is a **must-have** requirement: *"read the source code to list which URL is handled by which function and lines"*.
+
+```mermaid
+flowchart TD
+    SRC["/target-src/*.py\nread-only volume mount"]
+
+    subgraph STEP1["Step 1: Parse AST"]
+        PARSE["ast.parse(source)\nfor each .py file"]
+    end
+
+    subgraph STEP2["Step 2: Extract Routes (FR-4)"]
+        ROUTES["route_extractor.py\n@app.route · @app.post · @app.get\n@app.errorhandler · @router.*\noutput: [{route, function, file, line}]"]
+    end
+
+    subgraph STEP3["Step 3: Find Sinks"]
+        SINKS["sink_detector.py\n.execute(tainted) → CWE-89\nrender_template_string → CWE-94\npickle.loads → CWE-502\njwt.decode(verify=False) → CWE-347\nos.popen(tainted) → CWE-78\nhashlib.md5 → CWE-916\nopen(user_input) → CWE-22\nredirect(user_input) → CWE-601"]
+    end
+
+    subgraph STEP4["Step 4: BFS Call Graph"]
+        BFS["call_graph.py\nfor each route handler:\n  BFS(handler, call_edges)\n  → set of reachable functions\nfor each sink:\n  if containing_fn ∈ reachable → reachable\n  else → unreachable (dead code)"]
+    end
+
+    subgraph OUT["Output"]
+        REACH["reachable_sinks[]\nlinked to routes\nused for FR-5 correlation"]
+        UNREACH["unreachable_sinks[]\ndead code\nlabel = Code only (B-2 noise cut)"]
+        STATS["stats.suppression_ratio\ntarget ≥ 0.70"]
+    end
+
+    SRC --> PARSE --> STEP2 --> STEP3 --> STEP4
+    STEP4 --> REACH
+    STEP4 --> UNREACH
+    STEP4 --> STATS
 ```
 
-### 4.3 Correlation & Merge Engine (Objective 02)
-
+**FR-4 API output example:**
 ```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                    CORRELATION & MERGE ENGINE                                │
-│                    (Objective 02: each vulnerability appears ONCE)           │
-│                                                                              │
-│  INPUTS:                                                                    │
-│  sast_findings = [                                                          │
-│    F1: {source=sast, cwe=CWE-94, file=app.py, line=89, routes=["/404"]}   │
-│    F2: {source=sast, cwe=CWE-347, file=app.py, line=42, routes=["/login"]}│
-│    F3: {source=sast, cwe=CWE-89, file=dead_code.py, line=18, routes=[]}   │
-│    F4: {source=sast, cwe=CWE-502, file=dead_code.py, line=24, routes=[]}  │
-│  ]                                                                          │
-│                                                                              │
-│  dast_findings = [                                                          │
-│    D1: {source=dast, cwe=CWE-94, url=http://target/nonexistent, param=url}│
-│    D2: {source=dast, cwe=CWE-347, url=http://target/login, param=token}   │
-│    D3: {source=dast, cwe=CWE-10, url=http://target/, param=null}          │
-│  ]                                                                          │
-│                                                                              │
-│  MERGE ALGORITHM:                                                           │
-│  ─────────────────                                                          │
-│                                                                              │
-│  F1 (CWE-94):                                                               │
-│    dast_by_cwe["CWE-94"] = [D1]                                            │
-│    D1.url="/nonexistent" ∩ F1.routes=["/404"] → no path match              │
-│    but CWE matches → MERGE F1+D1 → label="Confirmed" (confidence=0.80)    │
-│    merged_from=[F1.id, D1.id]                                              │
-│    D1 consumed ✓                                                            │
-│                                                                              │
-│  F2 (CWE-347):                                                              │
-│    dast_by_cwe["CWE-347"] = [D2]                                           │
-│    D2.url="/login" ∈ F2.routes=["/login"] → route match ✅                 │
-│    MERGE F2+D2 → label="Confirmed" (confidence=0.95, dual_confirmed=True) │
-│    merged_from=[F2.id, D2.id]                                              │
-│    D2 consumed ✓                                                            │
-│                                                                              │
-│  F3 (CWE-89, dead code):                                                   │
-│    dast_by_cwe["CWE-89"] = []  (ZAP didn't find SQLi)                     │
-│    No DAST match → label="Code only" (unreachable, will be suppressed)    │
-│                                                                              │
-│  F4 (CWE-502, dead code):                                                  │
-│    No DAST match → label="Code only" (unreachable, suppressed)            │
-│                                                                              │
-│  D3 (CWE-10, DAST only):                                                   │
-│    Not consumed by any SAST finding → label="Runtime only"                 │
-│                                                                              │
-│  OUTPUT (sorted: Confirmed first):                                          │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  Rank 1: 🔴 Confirmed  — CWE-347 (JWT) — app.py:42 — /login        │   │
-│  │          merged_from=[F2.id, D2.id]  confidence=0.95               │   │
-│  │          code_location={file:app.py, line:42}                       │   │
-│  │          runtime_proof={url:/login, method:POST, param:token}       │   │
-│  │                                                                      │   │
-│  │  Rank 1: 🔴 Confirmed  — CWE-94 (SSTI) — app.py:89 — /404         │   │
-│  │          merged_from=[F1.id, D1.id]  confidence=0.80               │   │
-│  │          code_location={file:app.py, line:89}                       │   │
-│  │          runtime_proof={url:/nonexistent, param:url}                │   │
-│  │                                                                      │   │
-│  │  Rank 2: 🟡 Code only  — CWE-89 (SQLi) — dead_code.py:18          │   │
-│  │          reachable=False  (suppressed — dead code)                  │   │
-│  │                                                                      │   │
-│  │  Rank 2: 🟡 Code only  — CWE-502 (Pickle) — dead_code.py:24       │   │
-│  │          reachable=False  (suppressed — dead code)                  │   │
-│  │                                                                      │   │
-│  │  Rank 3: 🟠 Runtime only — CWE-10 (config) — http://target/        │   │
-│  │          No code sink found                                          │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                              │
-│  DEDUPLICATION: 4 SAST + 3 DAST = 7 raw findings → 5 merged (2 consumed)  │
-│  Each real vulnerability appears EXACTLY ONCE ✅                            │
-└──────────────────────────────────────────────────────────────────────────────┘
+GET /api/routes →
+[
+  { "route": "/api/orders",  "function": "get_orders",  "file": "orders.py", "line": 80 },
+  { "route": "/api/login",   "function": "login",       "file": "auth.py",   "line": 42 },
+  { "route": "__error_404__","function": "pnf",         "file": "app.py",    "line": 89 }
+]
 ```
 
-### 4.4 LangGraph Verification Loop (Objective 02+03)
+### 4.3 Correlation & Merge Engine — FR-5, FR-6
 
-```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                    LANGGRAPH STATE MACHINE                                   │
-│                    (Objective 02+03: live label flip)                        │
-│                                                                              │
-│  StateGraph(AlertState)                                                     │
-│                                                                              │
-│  Nodes:                                                                     │
-│  ┌──────────────────┐                                                       │
-│  │ probe_generator  │  Selects canary payload from CANARY_PAYLOADS dict    │
-│  │                  │  by sink_type + probe_variant (0=primary, 1=retry)   │
-│  │  Payloads:       │                                                       │
-│  │  sql_injection   │  ["' OR '1'='1", "' OR 1=1--"]                       │
-│  │  xss             │  ["<script>alert(1)</script>", "<img...>"]           │
-│  │  ssti            │  ["{{7*7}}", "${7*7}"]                               │
-│  │  jwt_weak_secret │  [crafted JWT signed with "secret"]                  │
-│  │  command_injection│ ["; echo CANARY_MITIGATA_2026"]                     │
-│  └────────┬─────────┘                                                       │
-│           │                                                                  │
-│           ▼                                                                  │
-│  ┌──────────────────┐                                                       │
-│  │ runtime_executor │  httpx.request() to http://target:5050{route}        │
-│  │                  │  timeout=2.0s (HARD LIMIT — never blocks demo)       │
-│  │  Internal Docker │  records: status, response[:500], probe_history      │
-│  │  network ONLY    │  on TimeoutException → label="Code only", continue   │
-│  └────────┬─────────┘                                                       │
-│           │                                                                  │
-│           ▼                                                                  │
-│  ┌──────────────────────┐                                                   │
-│  │  response_evaluator  │  checks response text for EVIDENCE_SIGNALS       │
-│  │                      │  per sink_type                                   │
-│  │  sql_injection:  ["OperationalError", "sqlite3", "OR '1'='1"]          │
-│  │  ssti:           ["49", "Jinja2", "TemplateError"]                      │
-│  │  xss:            ["<script>", "alert(1)", "onerror"]                   │
-│  │  jwt_weak_secret: ["Authenticated", "admin", "User"]                   │
-│  │                                                                          │
-│  │  found signals → label="Confirmed"                                      │
-│  │  no signals    → label="Code only"                                      │
-│  └────────┬─────────────┘                                                   │
-│           │                                                                  │
-│    ┌──────┴──────────┐                                                      │
-│    │                 │  should_retry() conditional edge                    │
-│  "Confirmed"    "Code only"                                                 │
-│    │             AND probe_variant==0                                       │
-│    │                 │                                                      │
-│    │           ┌─────┴──────┐                                              │
-│    │           │            │                                              │
-│    │         Yes           No                                              │
-│    │           │            │                                              │
-│    │    ┌──────────────┐   END                                             │
-│    │    │retry_evaluator│  (label stays "Code only")                       │
-│    │    │ variant += 1  │                                                   │
-│    │    └──────┬────────┘                                                   │
-│    │           │ loops back                                                 │
-│    │           ▼                                                            │
-│    │    [probe_generator with variant=1]                                   │
-│    │                                                                        │
-│    ▼                                                                        │
-│   END (label="Confirmed", evidence captured)                               │
-│                                                                              │
-│  PROBE SAFETY CONSTRAINTS:                                                  │
-│  ✅ All payloads are read-only canary strings                               │
-│  ✅ No DROP TABLE, no OS wipes, no file writes                              │
-│  ✅ Probes only on SAST-flagged routes (no spider)                         │
-│  ✅ Internal Docker network only (no external traffic)                     │
-│  ✅ 2.0s hard timeout (never blocks demo)                                  │
-│  ✅ probe_history records all attempts for UI audit trail                  │
-└──────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph INPUTS["Inputs (after AST enrichment)"]
+        SF["sast_findings[]\nreachable=True/False\nroutes=['/login', ...]"]
+        DF["dast_findings[]\nurl='http://target/login'\ncwe_id='CWE-347'"]
+    end
+
+    subgraph FR5["FR-5: Correlate — link DAST to SAST"]
+        JOIN1{CWE match\nAND route match?}
+        JOIN2{CWE match\nonly?}
+        CONF["MERGE → Confirmed\ncode_location + runtime_proof\nmerged_from=[sast.id, dast.id]\nconfidence=0.95"]
+        CONF2["MERGE → Confirmed\nCWE match sufficient\nconfidence=0.80"]
+    end
+
+    subgraph FR6["FR-6: Merge Duplicates"]
+        DEDUP["consumed_dast_ids set\nprevents double-counting\nscan twice = same result"]
+        SONLY["SAST only → Code only\nno DAST match found"]
+        DONLY["DAST only → Runtime only\nnot consumed by any SAST"]
+    end
+
+    subgraph SORT["FR-9: Prioritised List"]
+        SORTED["sort by label_rank:\nConfirmed=0 (first)\nCode only=1\nRuntime only=2"]
+    end
+
+    SF --> JOIN1
+    DF --> JOIN1
+    JOIN1 -->|Yes| CONF --> DEDUP
+    JOIN1 -->|No| JOIN2
+    JOIN2 -->|Yes| CONF2 --> DEDUP
+    JOIN2 -->|No| SONLY
+    DEDUP --> SORTED
+    SONLY --> SORTED
+    DONLY --> SORTED
 ```
 
-### 4.5 3-Label Classifier (Objective 03)
+### 4.4 LangGraph Verification Loop — B-1
 
-```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                    3-LABEL CLASSIFIER                                        │
-│                    (Objective 03: Confirmed / Code only / Runtime only)      │
-│                                                                              │
-│  Classification rules (strict priority order):                              │
-│                                                                              │
-│  Rule 1: LangGraph label="Confirmed" AND dual_confirmed=True               │
-│          → label=Confirmed, confidence=0.98                                 │
-│          reason="SAST sink + DAST probe both confirmed; CWE and route match"│
-│                                                                              │
-│  Rule 2: LangGraph label="Confirmed"                                        │
-│          → label=Confirmed, confidence=0.90                                 │
-│          reason="Runtime probe confirmed exploitation evidence"              │
-│                                                                              │
-│  Rule 3: is_config_only=True (no code sink, DAST only)                     │
-│          → label=Runtime only, confidence=0.85                              │
-│          reason="Runtime misconfiguration only (headers/CORS/TLS)"         │
-│                                                                              │
-│  Rule 4: ast_reachable=False (dead code, no route leads here)              │
-│          → label=Code only, confidence=0.95                                 │
-│          reason="Dead code — no HTTP route leads to this function"          │
-│                                                                              │
-│  Rule 5: ast_reachable=True (reachable but probe inconclusive)             │
-│          → label=Code only, confidence=0.70                                 │
-│          reason="Route exposed, leads to sink, probe inconclusive"          │
-│                                                                              │
-│  Rule 6: ast_reachable=None (unknown)                                       │
-│          → label=Code only, confidence=0.50                                 │
-│          reason="AST reachability unknown; conservative assignment"         │
-│                                                                              │
-│  RANKING (Objective 03 hard requirement):                                   │
-│  Confirmed    → Rank 1 (always first in UI, API, exports)                  │
-│  Code only    → Rank 2                                                      │
-│  Runtime only → Rank 3                                                      │
-│                                                                              │
-│  SUPPRESSION:                                                               │
-│  Code only + reachable=False → suppressed in default view                  │
-│  Still accessible via "Show suppressed" toggle                              │
-│  suppression_ratio = suppressed_count / total_sast_count                   │
-│  Target: ≥ 0.70                                                             │
-└──────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+stateDiagram-v2
+    [*] --> probe_generator : Code only finding
+
+    probe_generator : probe_generator\nselect payload by sink_type\nvariant 0=primary, 1=retry
+
+    runtime_executor : runtime_executor\nhttpx.request() → target:5050\ntimeout = 2.0s HARD LIMIT\ninternal Docker network only
+
+    response_evaluator : response_evaluator\ncheck EVIDENCE_SIGNALS[sink_type]\nsql: OperationalError, sqlite3\nssti: 49, Jinja2\nxss: script, onerror\ncmd: CANARY_MITIGATA_2026
+
+    retry_evaluator : retry_evaluator\nvariant += 1\nclear error + response
+
+    probe_generator --> runtime_executor
+    runtime_executor --> response_evaluator
+
+    response_evaluator --> [*] : Evidence found\nlabel = Confirmed 🔴
+    response_evaluator --> retry_evaluator : No evidence\nAND variant == 0
+    response_evaluator --> [*] : No evidence\nAND variant == 1\nlabel = Code only 🟡
+
+    retry_evaluator --> probe_generator : loop with variant=1
 ```
 
-### 4.6 Patch Engine
+**Probe safety constraints:**
+- ✅ Canary strings only — never `DROP TABLE`, never OS commands
+- ✅ Internal Docker network only — no external traffic
+- ✅ 2.0s hard timeout — never blocks demo
+- ✅ Probes only on SAST-flagged routes — no spider/crawl
+- ✅ `probe_history` records all attempts for UI audit trail
 
+### 4.5 3-Label Classifier — FR-7, FR-9
+
+```mermaid
+flowchart TD
+    INPUT([Finding after\ncorrelation + LangGraph]) --> R1
+
+    R1{LangGraph=Confirmed\nAND dual_confirmed?}
+    R1 -->|Yes| C1["🔴 Confirmed\nconfidence=0.98\nCWE + route both match"]
+
+    R1 -->|No| R2
+    R2{LangGraph=Confirmed?}
+    R2 -->|Yes| C2["🔴 Confirmed\nconfidence=0.90\nHTTP evidence captured"]
+
+    R2 -->|No| R3
+    R3{is_config_only?\nno code sink}
+    R3 -->|Yes| C3["🟠 Runtime only\nconfidence=0.85\nmissing headers/CORS/TLS"]
+
+    R3 -->|No| R4
+    R4{ast_reachable\n== False?}
+    R4 -->|Yes| C4["🟡 Code only\nconfidence=0.95\ndead code — suppressed\nB-2: noise cut"]
+
+    R4 -->|No| R5
+    R5{ast_reachable\n== True?}
+    R5 -->|Yes| C5["🟡 Code only\nconfidence=0.70\nreachable but probe\ninconclusive"]
+
+    R5 -->|No| C6["🟡 Code only\nconfidence=0.50\nAST unknown\nconservative"]
+
+    style C1 fill:#dc2626,color:#fff
+    style C2 fill:#dc2626,color:#fff
+    style C3 fill:#ea580c,color:#fff
+    style C4 fill:#ca8a04,color:#fff
+    style C5 fill:#ca8a04,color:#fff
+    style C6 fill:#ca8a04,color:#fff
 ```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                    PATCH ENGINE                                              │
-│                                                                              │
-│  Input: finding (Confirmed label, sink_type, file, line)                   │
-│                                                                              │
-│  Fallback Chain:                                                            │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  1. Azure OpenAI GPT-4o (primary)                                   │   │
-│  │     endpoint: AZURE_OPENAI_ENDPOINT                                 │   │
-│  │     model: AZURE_OPENAI_DEPLOYMENT (default: gpt-4o)               │   │
-│  │     timeout: 10s                                                    │   │
-│  │     temperature: 0 (deterministic output)                           │   │
-│  │     → returns unified diff starting with "---" or "@@"             │   │
-│  │                                                                     │   │
-│  │  2. Azure OpenAI GPT-4o-mini (fallback)                            │   │
-│  │     model: AZURE_OPENAI_FALLBACK_DEPLOYMENT (gpt-4o-mini)          │   │
-│  │     same prompt, faster/cheaper                                     │   │
-│  │                                                                     │   │
-│  │  3. Deterministic template patch (zero-cost, always available)     │   │
-│  │     PATCH_TEMPLATES["sql_injection"] → parameterised query         │   │
-│  │     PATCH_TEMPLATES["ssti"]          → render_template() fix       │   │
-│  │     PATCH_TEMPLATES["jwt_weak_secret"] → env-based secret          │   │
-│  │     PATCH_TEMPLATES["weak_hash"]     → bcrypt replacement          │   │
-│  │     PATCH_TEMPLATES["xss"]           → markupsafe.escape           │   │
-│  │     PATCH_TEMPLATES["command_injection"] → subprocess list args    │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                              │
-│  Apply Flow:                                                                │
-│  git apply --check {patch}  ← dry-run validation                           │
-│  git apply {patch}          ← write to /target-src                         │
-│  reverify()                 ← same LangGraph probe fires again             │
-│    probe blocked → "Fix Verified — Vulnerability Closed" ✅                │
-│    probe succeeds → "Fix Insufficient — Re-patch Required" ❌              │
-└──────────────────────────────────────────────────────────────────────────────┘
+
+### 4.6 Patch Engine — B-4
+
+```mermaid
+flowchart LR
+    subgraph INPUT["Input"]
+        FIND["Confirmed finding\nsink_type · file · line\ncode context ±5 lines"]
+    end
+
+    subgraph CHAIN["GPT-4o → GPT-4o-mini → Template fallback"]
+        GPT4O["Azure GPT-4o\ntemp=0 · 10s timeout\nreturns unified diff"]
+        MINI["Azure GPT-4o-mini\nfallback · faster"]
+        TPL["PATCH_TEMPLATES dict\nzero cost · always available\nCWE-89: parameterised query\nCWE-79: markupsafe.escape\nCWE-78: subprocess list args\nCWE-347: env JWT secret\nCWE-94: render_template()\nCWE-916: bcrypt"]
+    end
+
+    subgraph APPLY["Apply + Re-verify"]
+        CHECK["git apply --check\ndry-run validation"]
+        APPLY2["git apply\nwrite to /target-src"]
+        REVERIFY["Re-run same LangGraph probe\nexact same payload"]
+        RESULT["✅ Fix Verified\nor ❌ Re-patch Required"]
+    end
+
+    FIND --> GPT4O
+    GPT4O -->|valid diff| CHECK
+    GPT4O -->|fail/invalid| MINI
+    MINI -->|valid diff| CHECK
+    MINI -->|fail| TPL
+    TPL --> CHECK
+    CHECK --> APPLY2 --> REVERIFY --> RESULT
 ```
 
 ### 4.7 Compliance Translator
 
-```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                    COMPLIANCE TRANSLATOR                                     │
-│                                                                              │
-│  Input: Confirmed finding with cwe_id, severity                            │
-│                                                                              │
-│  Financial Risk (IBM 2024 India benchmark):                                 │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  severity=HIGH → breach_probability=65%                             │   │
-│  │  records_at_risk=10,000                                             │   │
-│  │  cost_per_record=₹5,000 (IBM 2024 India)                           │   │
-│  │  total_exposure = 10,000 × ₹5,000 × 0.65 = ₹3,25,00,000          │   │
-│  │  cyber_insurance_impact = ₹3.25cr > ₹50L threshold → TRUE         │   │
-│  │                                                                     │   │
-│  │  INC-06 reference:                                                  │   │
-│  │  "2017 Credit Bureau Breach: 145M records"                         │   │
-│  │  "Estimated exposure: ₹61,625 crore"                               │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                              │
-│  Compliance Mapping (CWE-89 example):                                      │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  rbi_csf:    "Annex I §4.2 — Input Validation & Parameterised Queries"│  │
-│  │  sebi_cscrf: "Domain 5: Application Security — Input Validation"    │   │
-│  │  iso_27001:  "A.8.28 — Secure coding; A.8.25 — Secure dev lifecycle"│   │
-│  │  dpdp_2023:  "§8(1) — Reasonable security safeguards"              │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                              │
-│  4 Frameworks covered per finding:                                          │
-│  ✅ RBI Cyber Security Framework                                            │
-│  ✅ SEBI CSCRF                                                              │
-│  ✅ ISO 27001:2022 Annex A                                                  │
-│  ✅ DPDP Act 2023 (India's data protection law, in force since 2023)       │
-└──────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    FIND([Confirmed finding\ncwe_id · severity]) --> RISK & MAP
+
+    subgraph RISK["Financial Risk (IBM 2024 India)"]
+        PROB["breach_probability\nHIGH=65% · MEDIUM=40%\nCRITICAL=85% · LOW=15%"]
+        EXP["total_exposure_inr\n= records × ₹5,000 × prob\nexample HIGH 10k records:\n= ₹3,25,00,000"]
+        INS["cyber_insurance_impact\n> ₹50L threshold → TRUE"]
+        INC06["INC-06 reference\n2017 Credit Bureau Breach\n145M records\n₹61,625 crore exposure"]
+    end
+
+    subgraph MAP["4-Framework Compliance Mapping"]
+        RBI["RBI CSF\nAnnex I §4.2 — Input Validation\nAnnex I §4.3 — IAM\nAnnex II — Advanced Measures"]
+        SEBI["SEBI CSCRF\nDomain 3: IAM\nDomain 5: Application Security"]
+        ISO["ISO 27001:2022\nA.8.28 — Secure coding\nA.8.5 — Secure authentication\nA.5.17 — Auth information"]
+        DPDP["DPDP Act 2023\n§8(1) — Reasonable safeguards\n§8(2) — Unauthorised access\n§9 — Children's data"]
+    end
+
+    RISK --> OUT
+    MAP --> OUT
+    OUT["ComplianceReport\n{financial_risk, compliance,\nframeworks_covered, inc06_ref}"]
 ```
 
-### 4.8 FastAPI Engine Layer
+### 4.8 FastAPI Engine Layer — FR-10
 
-```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                    FASTAPI ENGINE — API CONTRACT                             │
-│                    http://localhost:8000                                     │
-│                                                                              │
-│  GET  /api/graph                                                            │
-│    Triggers: ingestion → AST → correlation → classification → ELK layout   │
-│    Returns:  GraphResponse {nodes[], edges[], stats{}}                      │
-│    Cache:    10s TTL (re-build on demand)                                   │
-│    SLA:      ≤ 10 seconds total                                             │
-│                                                                              │
-│  POST /api/verify/{finding_id}                                              │
-│    Triggers: LangGraph verification loop                                    │
-│    Returns:  SSE stream (text/event-stream)                                 │
-│    Events:   {label, probe_history, done}                                   │
-│    SLA:      ≤ 2 seconds per probe                                          │
-│                                                                              │
-│  GET  /api/verify/{finding_id}/stream                                       │
-│    SSE endpoint for EventSource in frontend                                 │
-│    Streams: label updates + probe_history in real time                     │
-│                                                                              │
-│  POST /api/patch/{finding_id}                                               │
-│    Triggers: patch engine (GPT-4o → template fallback)                     │
-│    Returns:  {patch: "unified diff", source: "llm_gpt4o"|"template"}       │
-│    SLA:      ≤ 15 seconds (10s GPT timeout + 5s buffer)                   │
-│                                                                              │
-│  POST /api/patch/{finding_id}/apply                                         │
-│    Applies patch via git apply                                              │
-│    Triggers re-verification automatically                                   │
-│    Returns:  {success, reverify_result: {label, evidence}}                 │
-│                                                                              │
-│  GET  /api/compliance/{finding_id}                                          │
-│    Returns:  {financial_risk{}, compliance{rbi,sebi,iso,dpdp}, inc06_ref}  │
-│                                                                              │
-│  GET  /health                                                               │
-│    Returns:  {status: "ok", target_reachable: bool}                        │
-│    Used by:  Docker health check                                            │
-│                                                                              │
-│  GET  /docs                                                                 │
-│    Swagger UI (FastAPI auto-generated)                                      │
-│    Judges can explore API without frontend                                  │
-└──────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph LR
+    subgraph API["FastAPI Engine — http://localhost:8000"]
+        G["GET /api/graph\nfull correlation graph\n≤10s · ELK layout"]
+        V["POST /api/verify/{id}\nLangGraph probe\nSSE stream"]
+        VS["GET /api/verify/{id}/stream\nSSE for EventSource"]
+        P["POST /api/patch/{id}\ngenerate patch\nGPT-4o → template"]
+        PA["POST /api/patch/{id}/apply\napply + re-verify"]
+        C["GET /api/compliance/{id}\nINR + 4 frameworks"]
+        F["GET /api/findings\nall findings sorted\nConfirmed first"]
+        FI["GET /api/findings/{id}\nsingle finding detail\nFR-8: full detail"]
+        SAR["GET /api/export/sarif\nB-6: SARIF export\nCI fail on HIGH"]
+        H["GET /health\nDocker healthcheck"]
+        D["GET /docs\nSwagger UI auto-gen"]
+    end
+
+    subgraph MODULES["Engine Modules"]
+        ING["ingestion/\nsemgrep_parser\nzap_parser\ncorrelator"]
+        AST["ast_mapper/\nroute_extractor\nsink_detector\ncall_graph · merger"]
+        LGM["langgraph_loop/\nstate · nodes · graph"]
+        CLF["classifier/\nclassifier"]
+        PCH["patch_engine/\nllm_patcher · templates\npatcher"]
+        CMP["compliance/\nrisk_calculator · mapping"]
+    end
+
+    G --> ING & AST
+    V --> LGM
+    P --> PCH
+    C --> CMP
+    F & FI --> CLF
+    SAR --> ING
 ```
 
-### 4.9 React Frontend
+### 4.9 React Frontend — FR-8, FR-9
 
-```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                    REACT FRONTEND — COMPONENT TREE                          │
-│                    http://localhost:3000                                     │
-│                                                                              │
-│  App.tsx                                                                    │
-│  ├── StatsBar                                                               │
-│  │   ├── total findings count                                               │
-│  │   ├── confirmed count (red badge)                                        │
-│  │   ├── code_only count (yellow badge)                                     │
-│  │   ├── runtime_only count (orange badge)                                  │
-│  │   ├── suppression_ratio % (green if ≥70%)                               │
-│  │   └── cwe_types_covered[] (Objective 01 proof)                          │
-│  │                                                                          │
-│  ├── CorrelationGraph.tsx  (60% left panel)                                │
-│  │   ├── React Flow canvas (zoom/pan/click)                                │
-│  │   ├── ELK auto-layout (hierarchical, top-to-bottom)                     │
-│  │   ├── Node types:                                                        │
-│  │   │   ├── EndpointNode   (HTTP route)        — border by label colour   │
-│  │   │   ├── ControllerNode (handler function)  — border by label colour   │
-│  │   │   ├── SinkNode       (vulnerable line)   — filled by label colour   │
-│  │   │   ├── EvidenceNode   (HTTP proof)        — filled by label colour   │
-│  │   │   └── SuppressedNode (dead code)         — grey, collapsed          │
-│  │   ├── Edges:                                                             │
-│  │   │   ├── animated=true for Confirmed paths                             │
-│  │   │   └── dashed for Code only paths                                    │
-│  │   └── Confirmed nodes always rendered at top of canvas                 │
-│  │                                                                          │
-│  └── FindingDetailPanel.tsx  (40% right panel)                             │
-│      ├── LabelBadge (🔴/🟡/🟠 with confidence %)                          │
-│      ├── CodeSnippet (file:line with syntax highlight)                     │
-│      ├── HttpTrace (request + response evidence)                            │
-│      ├── CweReference (CWE number + description)                           │
-│      ├── VerifyButton → useVerification() hook → SSE stream                │
-│      │   └── ProbeHistory (expandable — shows retry attempts)              │
-│      ├── RemediateButton → usePatch() hook                                 │
-│      │   ├── DiffPreview (unified diff with syntax highlight)              │
-│      │   ├── ApplyButton → POST /api/patch/{id}/apply                      │
-│      │   └── VerificationStatus (✅/❌ live update)                        │
-│      └── BusinessRiskTab                                                   │
-│          ├── FinancialRisk (₹ exposure, breach probability %)              │
-│          ├── ComplianceTable (RBI / SEBI / ISO / DPDP rows)               │
-│          ├── CyberInsuranceFlag (YES/NO badge)                             │
-│          └── Inc06Reference ("2017 Credit Bureau Breach" callout)         │
-└──────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    subgraph APP["App.tsx — http://localhost:3000"]
+        SB["StatsBar\ntotal · confirmed · code_only\nruntime_only · suppression_ratio\ncwe_types_covered (Obj 01 proof)"]
+
+        subgraph LEFT["60% Left Panel"]
+            CG["CorrelationGraph.tsx\nReact Flow canvas\nELK auto-layout\nConfirmed nodes first\nanimated edges for Confirmed"]
+            NT["Node Types\nEndpointNode — HTTP route\nControllerNode — handler fn\nSinkNode — vulnerable line\nEvidenceNode — HTTP proof\nSuppressedNode — dead code grey"]
+        end
+
+        subgraph RIGHT["40% Right Panel"]
+            DP["FindingDetailPanel.tsx\nFR-8: URL+param+payload\nfile+line+CWE+snippet"]
+            LB["LabelBadge\n🔴/🟡/🟠 + confidence %"]
+            CS["CodeSnippet\nsyntax highlighted\nline number marker"]
+            HT["HttpTrace\nrequest + response evidence"]
+            VB["VerifyButton → B-1\nuseVerification() hook\nSSE stream → live flip"]
+            PH["ProbeHistory\nexpandable audit log\nshows retry attempts"]
+            RB["RemediateButton → B-4\nDiffPreview unified diff\nApplyButton\nVerificationStatus ✅/❌"]
+        end
+
+        subgraph RISK["Business Risk Tab"]
+            FR["FinancialRisk\n₹ exposure · breach prob %"]
+            CT["ComplianceTable\nRBI / SEBI / ISO / DPDP rows"]
+            CI["CyberInsuranceFlag\nYES/NO badge"]
+            IR["Inc06Reference\n2017 Credit Bureau callout"]
+        end
+    end
+
+    SB --> LEFT
+    SB --> RIGHT
+    CG --> DP
+    DP --> LB & CS & HT & VB & RB
+    VB --> PH
+    DP --> RISK
 ```
 
 ---
 
 ## 5. Network Topology
 
+```mermaid
+graph TB
+    subgraph HOST["Host Machine"]
+        B["Browser :3000"]
+        C["curl :8000"]
+        X["curl :5050 ❌"]
+    end
+
+    subgraph PUB["Docker Network: public"]
+        FE["mitigata-frontend\n:3000"]
+        ENG["mitigata-engine\n:8000"]
+    end
+
+    subgraph INT["Docker Network: internal\ninternal: true"]
+        TGT["mitigata-target\n:5050\nNOT on public network"]
+    end
+
+    B --> FE
+    C --> ENG
+    X -. "connection refused" .-> TGT
+    FE <--> ENG
+    ENG -->|"LangGraph probes\nhttp://target:5050\ninternal network only"| TGT
+
+    style INT fill:#2d1515,color:#fff
+    style X fill:#dc2626,color:#fff
 ```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                    DOCKER NETWORK TOPOLOGY                                   │
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  HOST MACHINE                                                        │   │
-│  │                                                                      │   │
-│  │  Browser → :3000 ──────────────────────────────────────────────┐   │   │
-│  │  curl    → :8000 ──────────────────────────────────────────┐   │   │   │
-│  │  curl    → :5050 ──── BLOCKED ✗ (internal network)         │   │   │   │
-│  │                                                             │   │   │   │
-│  └─────────────────────────────────────────────────────────── │ ─ │ ──┘   │
-│                                                                │   │       │
-│  ┌─────────────────────────────────────────────────────────── │ ─ │ ──┐   │
-│  │  PUBLIC NETWORK (docker network: public)                   │   │   │   │
-│  │                                                             │   │   │   │
-│  │  ┌──────────────────────────────────────────┐             │   │   │   │
-│  │  │  mitigata-frontend  :3000                │◄────────────┘   │   │   │
-│  │  │  serves React app                        │                 │   │   │
-│  │  │  proxies /api/* → engine:8000            │─────────────────┤   │   │
-│  │  └──────────────────────────────────────────┘                 │   │   │
-│  │                                                                │   │   │
-│  │  ┌──────────────────────────────────────────┐                 │   │   │
-│  │  │  mitigata-engine    :8000                │◄────────────────┘   │   │
-│  │  │  FastAPI app                             │◄────────────────────┘   │
-│  │  │  reads /target-src (volume)              │                         │
-│  │  │  reads /app/data   (volume)              │                         │
-│  │  └──────────────────────────────────────────┘                         │
-│  │                              │                                         │
-│  └────────────────────────────── │ ──────────────────────────────────────┘   │
-│                                  │                                            │
-│  ┌─────────────────────────────── │ ──────────────────────────────────────┐  │
-│  │  INTERNAL NETWORK (docker network: internal, internal: true)           │  │
-│  │                                │                                       │  │
-│  │                                ▼                                       │  │
-│  │  ┌──────────────────────────────────────────────────────────────┐     │  │
-│  │  │  mitigata-target    :5050  (NOT exposed to host)             │     │  │
-│  │  │  we45/Vulnerable-Flask-App                                   │     │  │
-│  │  │  only reachable from engine via http://target:5050           │     │  │
-│  │  └──────────────────────────────────────────────────────────────┘     │  │
-│  └─────────────────────────────────────────────────────────────────────┘  │
-│                                                                              │
-│  PROBE SECURITY:                                                            │
-│  All LangGraph probes: engine → http://target:5050{route}                  │
-│  Route: engine internal network → target internal network                  │
-│  No probe ever leaves the Docker network ✅                                 │
-└──────────────────────────────────────────────────────────────────────────────┘
-```
+
+**Probe route:** `engine (internal) → target (internal)` — never leaves Docker network.
 
 ---
 
 ## 6. Data Schemas
 
-### 6.1 UnifiedFinding (Pydantic v2)
+### 6.1 UnifiedFinding — FR-3 Common Format
 
-```
-UnifiedFinding
-├── id:           str        (UUID, auto-generated)
-├── source:       "sast"|"dast"
-├── cwe_id:       str        (MANDATORY — "CWE-89", "CWE-79", etc.)
-├── label:        "Confirmed"|"Code only"|"Runtime only"|null
-│
-├── [Code location — from SAST + AST mapper]
-│   ├── file:     str|null   (e.g. "app/app.py")
-│   ├── line:     int|null   (e.g. 47)
-│   ├── function: str|null   (e.g. "login")
-│   └── sink_type: str|null  (e.g. "sql_injection")
-│
-├── [Runtime proof — from DAST + LangGraph]
-│   ├── url:       str|null  (e.g. "http://target:5050/login")
-│   ├── method:    str|null  (e.g. "POST")
-│   ├── parameter: str|null  (e.g. "username")
-│   ├── evidence:  str|null  (e.g. "Response contained: ['49']")
-│   └── http_status: int|null
-│
-├── [Correlation metadata]
-│   ├── rule_id:    str|null  (Semgrep rule ID)
-│   ├── severity:   str       (CRITICAL/HIGH/MEDIUM/LOW/INFO)
-│   ├── reachable:  bool|null (set by AST mapper)
-│   ├── routes:     list[str] (routes that reach this sink)
-│   ├── merged_from: list[str] (source finding IDs — Obj 02 dedup)
-│   └── confidence: float|null (0.0–1.0)
+```mermaid
+classDiagram
+    class UnifiedFinding {
+        +str id  UUID auto-generated
+        +str source  sast | dast
+        +str cwe_id  MANDATORY CWE-89 etc
+        +str label  Confirmed | Code only | Runtime only
+        +str file  app/app.py
+        +int line  47
+        +str function  login
+        +str sink_type  sql_injection
+        +str url  http://target/login
+        +str method  POST
+        +str parameter  username
+        +str evidence  Response contained 49
+        +int http_status  200
+        +str rule_id  semgrep rule id
+        +str severity  HIGH | MEDIUM | LOW
+        +bool reachable  set by AST mapper
+        +list routes  routes reaching this sink
+        +list merged_from  FR-6 dedup tracking
+        +float confidence  0.0 to 1.0
+    }
 ```
 
-### 6.2 AlertState (LangGraph)
+### 6.2 AlertState — LangGraph
 
-```
-AlertState (TypedDict)
-├── finding_id:    str
-├── route:         str        (e.g. "/login")
-├── method:        str        (e.g. "POST")
-├── parameter:     str        (e.g. "username")
-├── sink_type:     str        (e.g. "sql_injection")
-├── probe_payload: str        (e.g. "' OR '1'='1")
-├── probe_variant: int        (0=primary, 1=retry)
-├── http_status:   int|None
-├── http_response: str|None   (first 500 chars)
-├── evidence:      str|None   (signals found)
-├── label:         "Confirmed"|"Code only"|"Runtime only"|"UNVERIFIED"
-├── error:         str|None   (timeout, network error)
-└── probe_history: list[dict] (audit log for UI)
-    └── [{variant, payload, status, response_preview}]
+```mermaid
+classDiagram
+    class AlertState {
+        +str finding_id
+        +str route  /login
+        +str method  POST
+        +str parameter  username
+        +str sink_type  sql_injection
+        +str probe_payload  OR 1=1
+        +int probe_variant  0=primary 1=retry
+        +int http_status
+        +str http_response  first 500 chars
+        +str evidence  signals found
+        +str label  Confirmed | Code only | UNVERIFIED
+        +str error  timeout | network error
+        +list probe_history  audit log for UI
+    }
+
+    class ProbeRecord {
+        +int variant
+        +str payload
+        +int status
+        +str response_preview  first 200 chars
+    }
+
+    AlertState "1" --> "0..*" ProbeRecord : probe_history
 ```
 
-### 6.3 GraphResponse (API)
+### 6.3 GraphResponse — API
 
-```
-GraphResponse
-├── nodes: list[Node]
-│   └── Node
-│       ├── id:       str
-│       ├── type:     "endpoint"|"controller"|"sink"|"evidence"|"suppressed"
-│       ├── position: {x: float, y: float}  (ELK pre-computed)
-│       └── data
-│           ├── label:         str
-│           ├── finding_label: "Confirmed"|"Code only"|"Runtime only"|null
-│           ├── confidence:    float|null
-│           ├── file:          str|null
-│           ├── line:          int|null
-│           ├── cwe:           str|null
-│           └── evidence:      str|null
-│
-├── edges: list[Edge]
-│   └── Edge
-│       ├── id:       str
-│       ├── source:   str  (node id)
-│       ├── target:   str  (node id)
-│       └── animated: bool (true for Confirmed edges)
-│
-└── stats
-    ├── total:             int
-    ├── confirmed:         int
-    ├── code_only:         int
-    ├── runtime_only:      int
-    ├── suppression_ratio: float
-    └── cwe_types_covered: list[str]  (Objective 01 proof)
+```mermaid
+classDiagram
+    class GraphResponse {
+        +list nodes
+        +list edges
+        +GraphStats stats
+    }
+
+    class GraphNode {
+        +str id
+        +str type  endpoint|controller|sink|evidence|suppressed
+        +Position position  ELK pre-computed x y
+        +NodeData data
+    }
+
+    class NodeData {
+        +str label
+        +str finding_label  Confirmed | Code only | Runtime only
+        +float confidence
+        +str file
+        +int line
+        +str cwe
+        +str evidence
+    }
+
+    class GraphEdge {
+        +str id
+        +str source
+        +str target
+        +bool animated  true for Confirmed
+    }
+
+    class GraphStats {
+        +int total
+        +int confirmed
+        +int code_only
+        +int runtime_only
+        +float suppression_ratio
+        +list cwe_types_covered  Obj 01 proof
+    }
+
+    GraphResponse "1" --> "0..*" GraphNode : nodes
+    GraphResponse "1" --> "0..*" GraphEdge : edges
+    GraphResponse "1" --> "1" GraphStats : stats
+    GraphNode "1" --> "1" NodeData : data
 ```
 
 ---
 
 ## 7. API Contract
 
+```mermaid
+graph LR
+    subgraph ENDPOINTS["FastAPI Endpoints"]
+        E1["GET /api/graph\n≤10s · cached 10s TTL"]
+        E2["POST /api/verify/{id}\nSSE stream · ≤2s/probe"]
+        E3["GET /api/verify/{id}/stream\nEventSource endpoint"]
+        E4["POST /api/patch/{id}\n≤15s · GPT-4o/template"]
+        E5["POST /api/patch/{id}/apply\ngit apply + re-verify"]
+        E6["GET /api/compliance/{id}\n<200ms · dict lookup"]
+        E7["GET /api/findings\nsorted Confirmed first"]
+        E8["GET /api/findings/{id}\nFR-8 full detail"]
+        E9["GET /api/export/sarif\nB-6 SARIF export"]
+        E10["GET /health\nDocker healthcheck"]
+        E11["GET /docs\nSwagger UI"]
+    end
 ```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  METHOD  PATH                         DESCRIPTION                           │
-├──────────────────────────────────────────────────────────────────────────────┤
-│  GET     /api/graph                   Full correlation graph (≤10s)         │
-│  GET     /api/graph?refresh=true      Force re-build (clears cache)         │
-│  POST    /api/verify/{id}             Start LangGraph probe (SSE)           │
-│  GET     /api/verify/{id}/stream      SSE stream for label updates          │
-│  POST    /api/patch/{id}              Generate patch (GPT-4o/template)      │
-│  POST    /api/patch/{id}/apply        Apply patch + re-verify               │
-│  GET     /api/compliance/{id}         INR risk + 4-framework mapping        │
-│  GET     /api/findings                All findings (sorted: Confirmed first) │
-│  GET     /api/findings/{id}           Single finding detail                 │
-│  GET     /health                      Health check (Docker)                 │
-│  GET     /docs                        Swagger UI                            │
-└──────────────────────────────────────────────────────────────────────────────┘
 
-SSE Event Format (POST /api/verify/{id}):
-  data: {"label": "Code only", "probe_history": [...], "done": false}
-  data: {"label": "Confirmed", "evidence": "...", "probe_history": [...], "done": true}
-
-Error Response Format:
-  {"detail": "string", "code": "string", "finding_id": "string"}
+**SSE Event Format:**
+```json
+// Intermediate:
+{"label": "Code only", "probe_history": [...], "done": false}
+// Final:
+{"label": "Confirmed", "evidence": "['49']", "probe_history": [...], "done": true}
 ```
 
 ---
 
-## 8. Security Boundaries
+## 8. Answer Key Mapping
 
-```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                    SECURITY BOUNDARIES                                       │
-│                                                                              │
-│  1. PROBE CONTAINMENT                                                       │
-│     ✅ All probes via internal Docker network only                          │
-│     ✅ Target container NOT exposed on host port                            │
-│     ✅ 2.0s hard timeout on all probes                                      │
-│     ✅ Canary payloads only — no destructive strings                        │
-│     ✅ Probes only on SAST-flagged routes — no spider/crawl                 │
-│                                                                              │
-│  2. SOURCE CODE ACCESS                                                      │
-│     ✅ Target source mounted read-only (:ro volume)                         │
-│     ✅ AST mapper cannot write to source files                              │
-│     ✅ Patch engine writes via git apply — tracked and reversible           │
-│                                                                              │
-│  3. SECRETS MANAGEMENT                                                      │
-│     ✅ Azure OpenAI key in .env only — never in code                       │
-│     ✅ .env excluded from git (.gitignore)                                  │
-│     ✅ .env.example provided with placeholder values                        │
-│     ✅ No secrets in Docker image layers                                    │
-│                                                                              │
-│  4. LLM SAFETY                                                              │
-│     ✅ LLM invoked ONLY after deterministic AST mapping                    │
-│     ✅ LLM output validated: must start with "---" or "@@"                 │
-│     ✅ Fallback to template if LLM output invalid                           │
-│     ✅ temperature=0 for deterministic patch output                         │
-│                                                                              │
-│  5. DEMO SAFETY                                                             │
-│     ✅ Pre-seeded data files — demo works offline                           │
-│     ✅ Template patches — demo works without Azure key                     │
-│     ✅ No login screen — direct to workbench                                │
-│     ✅ No destructive operations in any code path                          │
-└──────────────────────────────────────────────────────────────────────────────┘
+How our architecture maps to the 36 planted vulnerabilities judges score against:
+
+```mermaid
+graph TD
+    subgraph AK["Answer Key (36 planted)"]
+        P20["20 Code+Runtime Pairs\nConfirmed candidates"]
+        P10["10 Code only\ne.g. hardcoded secrets"]
+        P6["6 Runtime only\ne.g. missing headers"]
+        P8["~8 Safe Decoys\nparameterised queries\nshould NOT be reported"]
+    end
+
+    subgraph HOW["How We Hit Each"]
+        H20["CWE + route dual-key join\n→ Confirmed label\nFR-5 correlation\nLangGraph B-1 upgrades\nCode only → Confirmed"]
+        H10["SAST only, no DAST match\n→ Code only label\nFR-7 classification"]
+        H6["DAST only, no SAST match\n→ Runtime only label\nFR-7 classification"]
+        H8["AST reachability check\nparameterised query detection\nB-2 noise cut\nNOT reported"]
+    end
+
+    subgraph TARGETS["Performance Targets"]
+        T1["Correct links > 50% Good\n> 80% Great\n20 pairs · need 10-16 linked"]
+        T2["Wrong links < 20% Good\n< 5% Great\nAST gates false merges"]
+        T3["False alarms < 30% Good\n< 10% Great\nB-2 suppresses safe decoys"]
+        T4["Code detection > 60% Good\n> 85% Great\nSemgrep multi-config"]
+        T5["Runtime detection > 50% Good\n> 80% Great\nZAP all 30 routes"]
+    end
+
+    P20 --> H20 --> T1
+    P10 --> H10 --> T2
+    P6 --> H6 --> T3
+    P8 --> H8 --> T3
+    H20 --> T4
+    H20 --> T5
 ```
 
 ---
 
 ## 9. Performance Budget
 
+```mermaid
+gantt
+    title Operation Timing Budget
+    dateFormat  X
+    axisFormat  %ss
+
+    section Startup
+    docker compose up --build    :0, 60
+    Target healthcheck           :0, 30
+
+    section API (cold)
+    GET /api/graph (cold)        :crit, 0, 10
+    GET /api/graph (warm/cached) :0, 1
+
+    section LangGraph Probes
+    Single probe (hard limit)    :crit, 0, 2
+    Probe + retry (2 attempts)   :0, 4
+
+    section UI
+    Initial render               :crit, 0, 3
+    Node click → detail          :0, 1
+
+    section Patch
+    GPT-4o patch generation      :0, 10
+    Template patch (fallback)    :0, 1
+    git apply + re-verify        :0, 3
+    Total patch + re-verify      :crit, 0, 15
+
+    section Compliance
+    Compliance report            :0, 1
 ```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                    PERFORMANCE BUDGET                                        │
-│                                                                              │
-│  Operation                          Budget    Implementation                │
-│  ─────────────────────────────────────────────────────────────────────────  │
-│  docker compose up --build          < 60s     cached layers after first run │
-│  Target healthcheck pass            < 30s     curl retry 3x with 10s gap   │
-│                                                                              │
-│  GET /api/graph (cold)              ≤ 10s     AST parse + ELK layout       │
-│  GET /api/graph (warm, cached)      < 1s      in-memory cache              │
-│                                                                              │
-│  Single LangGraph probe             ≤ 2s      httpx timeout=2.0s           │
-│  LangGraph probe + retry            ≤ 4s      2 × 2s probes               │
-│                                                                              │
-│  UI initial render                  ≤ 3s      pre-computed ELK positions   │
-│  Node click → detail panel          < 100ms   local state, no API call     │
-│  Label badge flip (SSE)             < 500ms   SSE event → React state      │
-│                                                                              │
-│  Patch generation (GPT-4o)          ≤ 10s     10s timeout on LLM call     │
-│  Patch generation (template)        < 50ms    dict lookup                  │
-│  git apply --check + apply          < 1s      local file operation         │
-│  Re-verification after patch        ≤ 2s      same LangGraph probe        │
-│  Total patch + re-verify            ≤ 15s     within budget               │
-│                                                                              │
-│  Compliance report generation       < 200ms   dict lookup + arithmetic     │
-└──────────────────────────────────────────────────────────────────────────────┘
-```
+
+| Operation | Budget | Implementation |
+|---|---|---|
+| `docker compose up --build` | < 60s | cached layers after first run |
+| Target healthcheck | < 30s | curl retry 3× with 10s gap |
+| `GET /api/graph` (cold) | **≤ 10s** | AST parse + ELK layout |
+| `GET /api/graph` (warm) | < 1s | in-memory cache |
+| Single LangGraph probe | **≤ 2s** | `httpx timeout=2.0` |
+| Probe + retry | ≤ 4s | 2 × 2s probes |
+| UI initial render | **≤ 3s** | pre-computed ELK positions |
+| Patch generation (GPT-4o) | ≤ 10s | 10s timeout on LLM |
+| Patch generation (template) | < 50ms | dict lookup |
+| Total patch + re-verify | **≤ 15s** | within PRD budget |
+| Full scan + report | **< 5 min** | pre-seeded data + targeted probes |
 
 ---
 
 ## 10. Dependency Graph
 
-```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                    MODULE DEPENDENCY GRAPH                                   │
-│                                                                              │
-│  engine/api/main.py                                                         │
-│  ├── engine/ingestion/semgrep_parser.py                                     │
-│  │   └── engine/ingestion/schema.py  (UnifiedFinding)                      │
-│  ├── engine/ingestion/zap_parser.py                                         │
-│  │   └── engine/ingestion/schema.py                                         │
-│  ├── engine/ingestion/correlator.py                                         │
-│  │   └── engine/ingestion/schema.py                                         │
-│  ├── engine/ast_mapper/call_graph.py                                        │
-│  │   ├── engine/ast_mapper/route_extractor.py  (stdlib: ast, os)           │
-│  │   └── engine/ast_mapper/sink_detector.py    (stdlib: ast)               │
-│  ├── engine/ast_mapper/merger.py                                            │
-│  │   └── engine/ingestion/schema.py                                         │
-│  ├── engine/langgraph_loop/graph.py                                         │
-│  │   ├── engine/langgraph_loop/state.py                                     │
-│  │   └── engine/langgraph_loop/nodes.py        (httpx, os)                 │
-│  ├── engine/classifier/classifier.py           (stdlib only)               │
-│  ├── engine/patch_engine/patcher.py                                         │
-│  │   ├── engine/patch_engine/llm_patcher.py    (openai, os)                │
-│  │   └── engine/patch_engine/templates.py      (stdlib only)               │
-│  └── engine/compliance/mapping.py                                           │
-│      └── engine/compliance/risk_calculator.py  (stdlib only)               │
-│                                                                              │
-│  Python dependencies:                                                       │
-│  fastapi, uvicorn, pydantic>=2, httpx, langgraph, openai                   │
-│  (stdlib: ast, os, json, uuid, collections, subprocess, tempfile)          │
-│                                                                              │
-│  frontend/src/App.tsx                                                       │
-│  ├── @xyflow/react           (interactive node graph)                       │
-│  ├── elkjs                   (auto-layout)                                  │
-│  ├── @tanstack/react-query   (data fetching)                               │
-│  └── tailwindcss             (styling)                                      │
-│                                                                              │
-│  No circular dependencies. Ingestion schema is the only shared module.     │
-└──────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    subgraph ENGINE["engine/"]
+        MAIN["api/main.py\nFastAPI app"]
 
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                    OBJECTIVE-TO-COMPONENT MAPPING                           │
-│                                                                              │
-│  OBJECTIVE 01 (Scan Code + App — ≥4 CWE types, one format)                 │
-│  └── semgrep_parser.py + zap_parser.py + schema.py (UnifiedFinding)        │
-│      CWE coverage: CWE-89✅ CWE-79✅ CWE-94 CWE-347 CWE-502 CWE-78        │
-│                                                                              │
-│  OBJECTIVE 02 (Correlate + Merge — link runtime→code, each vuln once)      │
-│  └── call_graph.py (AST BFS) + merger.py + correlator.py                   │
-│      Deduplication via merged_from[] + consumed_dast_ids set                │
-│      Deterministic: no LLM in this pipeline stage                          │
-│                                                                              │
-│  OBJECTIVE 03 (Prioritise — Confirmed/Code only/Runtime only, ranked)      │
-│  └── classifier.py + correlator.py (sort) + langgraph_loop/graph.py        │
-│      Confirmed always rank 1 in API responses, UI, exports                 │
-│      Suppression: Code only + reachable=False → suppressed in default view │
-└──────────────────────────────────────────────────────────────────────────────┘
+        subgraph ING["ingestion/"]
+            SCHEMA["schema.py\nUnifiedFinding\nPydantic v2"]
+            SP["semgrep_parser.py"]
+            ZP["zap_parser.py"]
+            CORR["correlator.py\nFR-5 FR-6"]
+        end
+
+        subgraph AST["ast_mapper/"]
+            RE["route_extractor.py\nFR-4\nstdlib: ast, os"]
+            SD["sink_detector.py\nstdlib: ast"]
+            CG["call_graph.py\nBFS reachability"]
+            MG["merger.py\nAST enrichment"]
+        end
+
+        subgraph LGM["langgraph_loop/"]
+            ST["state.py\nAlertState TypedDict"]
+            ND["nodes.py\nhttpx, os"]
+            GR["graph.py\nStateGraph"]
+        end
+
+        CLF["classifier/classifier.py\nstdlib only"]
+
+        subgraph PCH["patch_engine/"]
+            LP["llm_patcher.py\nopenai, os"]
+            TP["templates.py\nstdlib only"]
+            PA["patcher.py\nsubprocess, git"]
+        end
+
+        subgraph CMP["compliance/"]
+            RC["risk_calculator.py\nstdlib only"]
+            CM["mapping.py\nstdlib only"]
+        end
+    end
+
+    MAIN --> SP & ZP & CORR
+    MAIN --> CG & MG
+    MAIN --> GR
+    MAIN --> CLF
+    MAIN --> PA
+    MAIN --> CM
+
+    SP --> SCHEMA
+    ZP --> SCHEMA
+    CORR --> SCHEMA
+    MG --> SCHEMA
+    CG --> RE & SD
+    GR --> ST & ND
+    PA --> LP & TP
+    CM --> RC
+
+    subgraph FRONTEND["frontend/src/"]
+        APP["App.tsx"]
+        CGRAPH["CorrelationGraph.tsx\n@xyflow/react · elkjs"]
+        FDP["FindingDetailPanel.tsx"]
+        BRP["BusinessRiskPanel.tsx"]
+        RTB["ReTestButton.tsx"]
+        HOOKS["hooks/\nuseVerification SSE\nusePatch"]
+    end
+
+    APP --> CGRAPH & FDP & BRP & RTB
+    FDP --> HOOKS
+    RTB --> HOOKS
+
+    subgraph DEPS["Python deps"]
+        FASTAPI["fastapi · uvicorn"]
+        PYDANTIC["pydantic>=2"]
+        HTTPX["httpx"]
+        LG_DEP["langgraph"]
+        OAI["openai (optional)"]
+    end
+
+    MAIN --- FASTAPI
+    SCHEMA --- PYDANTIC
+    ND --- HTTPX
+    GR --- LG_DEP
+    LP --- OAI
+```
+
+**Objective-to-Component Mapping:**
+
+```mermaid
+graph LR
+    subgraph OBJ["Objectives → Components"]
+        O1["Objective 01\nFR-1 FR-2 FR-3"] --> C1["semgrep_parser\nzap_parser\nschema UnifiedFinding"]
+        O2["Objective 02\nFR-4 FR-5 FR-6"] --> C2["route_extractor FR-4\ncall_graph BFS\ncorrelator FR-5 FR-6\nmerger"]
+        O3["Objective 03\nFR-7 FR-8 FR-9"] --> C3["classifier\nlanggraph_loop B-1\nFindingDetailPanel FR-8\ncorrelator sort FR-9"]
+    end
 ```
 
 ---
 
-*Architecture version: 1.0 — Mitigata Hackathon Problem 06 (Flagship)*  
-*All diagrams use ASCII art for maximum portability (renders in any Markdown viewer, terminal, or IDE)*  
-*Reference: [P06-SAST-DAST-Correlation-Engine.md](P06-SAST-DAST-Correlation-Engine.md) · [P06-Build-Plan.md](P06-Build-Plan.md)*
+*Architecture version: 1.1 — Mitigata Hackathon Problem 06 (Flagship)*  
+*All diagrams use Mermaid — renders natively in GitHub, GitLab, VS Code with Markdown Preview Enhanced, and Obsidian*  
+*Reference: [P06-PRD.md](P06-PRD.md) · [P06-SAST-DAST-Correlation-Engine.md](P06-SAST-DAST-Correlation-Engine.md) · [P06-Build-Plan.md](P06-Build-Plan.md)*

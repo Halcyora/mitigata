@@ -1,10 +1,82 @@
 # P06 Build Plan — Phase-by-Phase Winning Strategy
 
 > **Goal:** Maximum points — 100 base + Flagship Bonus  
+> **PRD:** [P06-PRD.md](P06-PRD.md) — source of truth for all requirements  
 > **Reference:** [P06-SAST-DAST-Correlation-Engine.md](P06-SAST-DAST-Correlation-Engine.md)  
 > **One-command start:** `docker compose up --build` → open `http://localhost:3000`  
-> **Build plan version:** 3.0 — aligned with Problem 06 official statement  
+> **Build plan version:** 3.1 — aligned with official PRD (Anuj, 30 Oct 2026)  
 > **Three mandatory objectives:** Scan Code+App · Correlate+Merge · Prioritise
+
+---
+
+## PRD Quick Reference
+
+> Full requirements: [P06-PRD.md](P06-PRD.md)
+
+### Answer Key (what judges measure us against)
+
+| Category | Count | Our Label | How We Hit It |
+|---|---|---|---|
+| Code + Runtime pairs (linkable) | **20** | Confirmed | CWE + route join → merge → LangGraph probe |
+| Code only (e.g. hardcoded secrets) | **10** | Code only | SAST only, no DAST match |
+| Runtime only (e.g. missing headers) | **6** | Runtime only | DAST only, no SAST match |
+| Safe decoys (false positive traps) | **~8** | Should NOT be reported | AST reachability + parameterised query detection |
+| **Total planted** | **36** | | |
+
+### Performance Targets We Must Hit
+
+| Metric | Good | Great | Our Strategy |
+|---|---|---|---|
+| Code detection | > 60% | > 85% | Semgrep p/python + p/flask + p/security-audit |
+| Runtime detection | > 50% | > 80% | ZAP targeted scan on all 30 routes |
+| Correct links | > 50% | > 80% | CWE + route dual-key join |
+| Wrong links | < 20% | < 5% | AST reachability gates correlation |
+| False alarms | < 30% | < 10% | Parameterised query detection (B-2) |
+| Unseen app | > 40% | > 65% | Generic AST patterns, not app-specific tuning |
+| Run time | < 15 min | < 5 min | Pre-seeded data + targeted probes only |
+
+### FR-to-Component Mapping
+
+| FR | Requirement | Component |
+|---|---|---|
+| FR-1 | SAST scan: file, line, CWE, snippet | `semgrep_parser.py` |
+| FR-2 | DAST scan: URL, method, param, payload, evidence | `zap_parser.py` |
+| FR-3 | One common format with CWE number | `schema.py` (UnifiedFinding) |
+| **FR-4** | **Route map: URL → function → lines** | **`route_extractor.py` + `call_graph.py`** |
+| **FR-5** | **Correlate: CWE + URL → one Confirmed issue** | **`correlator.py`** |
+| **FR-6** | **Merge duplicates: scan twice = same count** | **`correlator.py` (consumed_dast_ids)** |
+| FR-7 | Label: Confirmed / Code only / Runtime only | `classifier.py` |
+| FR-8 | Issue detail: URL + param + payload + file + line + CWE | `FindingDetailPanel.tsx` |
+| FR-9 | Prioritised list: Confirmed first, then risk score | `correlator.py` sort + UI |
+| FR-10 | CLI / API / page + README | FastAPI `/api/*` + `README.md` |
+
+### Bonus Features We Implement
+
+| Bonus | Feature | Our Implementation |
+|---|---|---|
+| **B-1** | Auto-verify Code only → Confirmed | LangGraph verification loop (Phase 4) |
+| **B-2** | Cut SAST noise (parameterised queries, dead code) | AST reachability + sink safety check (Phase 3) |
+| **B-3** | Explain every link (why joined) | `merged_from[]` + `reason` field in UI |
+| **B-4** | Plain-English fix suggestion | GPT-4o patch + template (Phase 6) |
+| B-5 | Compare two scans | Out of scope for v1 |
+| **B-6** | Export SARIF + CI fail on confirmed HIGH | SARIF export endpoint `/api/export/sarif` |
+| B-7 | Second language | Out of scope for v1 |
+
+### Official Vulnerability Types (PRD §5)
+
+| CWE | Type | Mandatory | In Our Sink Detector | In Our Dead Code |
+|---|---|---|---|---|
+| CWE-89 | SQL Injection | ✅ Yes | ✅ `sql_injection` | ✅ `_legacy_export_users` |
+| CWE-79 | XSS | ✅ Yes | ✅ `xss` | ✅ `_legacy_render_xss` |
+| CWE-78 | Command Injection | Pick ≥2 | ✅ `command_injection` | ✅ `_legacy_run_report` |
+| CWE-22 | Path Traversal | Pick ≥2 | ⚠️ Add to sink detector | ⚠️ Add to dead_code_helpers |
+| CWE-601 | Open Redirect | Pick ≥2 | ⚠️ Add to sink detector | ⚠️ Add to dead_code_helpers |
+| CWE-798 | Hard-coded Secrets | Pick ≥2 | ✅ `hardcoded_secret` | ✅ (in we45 config) |
+
+> **Action items for CWE-22 and CWE-601:**
+> - Add `path_traversal` and `open_redirect` patterns to `sink_detector.py`
+> - Add `_legacy_path_read()` and `_legacy_redirect()` functions to `dead_code_helpers.py`
+> - Add ZAP sink map entries for cweid 22 and 601
 
 ---
 

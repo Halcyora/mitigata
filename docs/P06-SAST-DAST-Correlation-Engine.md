@@ -3,8 +3,9 @@
 
 > **Mitigata Hackathon — Problem 06 · FLAGSHIP**  
 > Category: Application Security · AI/ML · Compliance Engineering  
-> Bonus Tier: **Flagship Problem** — Solve for bonus points  
-> Real Incident Reference: **INC-06** — 2017 Credit Bureau Breach (~145 million records)
+> Bonus Tier: **Flagship Challenge** — bonus points on top of normal score  
+> Real Incident Reference: **INC-06** — 2017 Credit Bureau Breach (~145 million records)  
+> PRD Reference: [P06-PRD.md](P06-PRD.md) — source of truth for all requirements
 
 ---
 
@@ -73,16 +74,18 @@ These three objectives are **what judges score**. All three must be demonstrated
 
 > Cover at least four of six vulnerability types, including SQL injection and XSS, in one common format with CWE numbers.
 
-**Required vulnerability coverage (minimum 4 of 6):**
+**Required vulnerability coverage (minimum 4 of 6) — from official PRD §5:**
 
-| # | Vulnerability Type | CWE | SAST Tool | DAST Tool |
+| # | Vulnerability Type | CWE | Can Be Found By | Mandatory |
 |---|---|---|---|---|
-| 1 | **SQL Injection** *(mandatory)* | CWE-89 | Semgrep | OWASP ZAP |
-| 2 | **Cross-Site Scripting (XSS)** *(mandatory)* | CWE-79 | Semgrep | OWASP ZAP |
-| 3 | Command Injection | CWE-78 | Semgrep | OWASP ZAP |
-| 4 | Server-Side Template Injection | CWE-94 | Semgrep | OWASP ZAP |
-| 5 | Insecure Deserialisation | CWE-502 | Semgrep | — |
-| 6 | Broken Authentication / JWT | CWE-347 | Semgrep | OWASP ZAP |
+| 1 | **SQL Injection** | CWE-89 | Code and runtime | ✅ Yes |
+| 2 | **Cross-Site Scripting (XSS)** | CWE-79 | Code and runtime | ✅ Yes |
+| 3 | Command Injection | CWE-78 | Code and runtime | Pick ≥2 more |
+| 4 | Path Traversal | CWE-22 | Code and runtime | Pick ≥2 more |
+| 5 | Open Redirect | CWE-601 | Code and runtime | Pick ≥2 more |
+| 6 | Hard-coded Secrets | CWE-798 | Code only | Pick ≥2 more |
+
+> **Important:** The official PRD vulnerability list is CWE-89, CWE-79, CWE-78, CWE-22, CWE-601, CWE-798. Earlier drafts listed CWE-502 (Pickle) and CWE-347 (JWT) — those are still detectable and score bonus points, but are not in the official 6-type list judges use for scoring.
 
 **Common format requirement:** All findings from both tools normalised into a single `UnifiedFinding` schema with mandatory `cwe_id` field.
 
