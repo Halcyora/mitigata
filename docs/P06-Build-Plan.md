@@ -4,7 +4,7 @@
 > **PRD:** [P06-PRD.md](P06-PRD.md) — source of truth for all requirements  
 > **Reference:** [P06-SAST-DAST-Correlation-Engine.md](P06-SAST-DAST-Correlation-Engine.md)  
 > **One-command start:** `docker compose up --build` → open `http://localhost:3000`  
-> **Build plan version:** 3.2 — 3-pass AST route mapping and parameter-aware correlation
+> **Build plan version:** 3.3 — Flask + Express adapters and multi-target scanning
 > **Three mandatory objectives:** Scan Code+App · Correlate+Merge · Prioritise
 
 ---
@@ -14,6 +14,9 @@
 > Full requirements: [P06-PRD.md](P06-PRD.md)
 
 ### Answer Key (what judges measure us against)
+
+The counts below describe the controlled Flask fixture only. Evaluate Juice Shop
+against its own pinned-revision ground truth and report those results separately.
 
 | Category | Count | Our Label | How We Hit It |
 |---|---|---|---|
@@ -27,13 +30,13 @@
 
 | Metric | Good | Great | Our Strategy |
 |---|---|---|---|
-| Code detection | > 60% | > 85% | Semgrep p/python + p/flask + p/security-audit |
-| Runtime detection | > 50% | > 80% | ZAP targeted scan on all 30 routes |
-| Correct links | > 50% | > 80% | CWE + normalized route + code scope + attacked parameter |
+| Code detection | > 60% | > 85% | Profile-specific Semgrep packs for Python/Flask and JavaScript |
+| Runtime detection | > 50% | > 80% | ZAP scoped to the selected local target profile |
+| Correct links | > 50% | > 80% | Target + CWE + normalized route + code scope + attacked parameter; method when known |
 | Wrong links | < 20% | < 5% | AST reachability gates correlation |
 | False alarms | < 30% | < 10% | Parameterised query detection (B-2) |
-| Unseen app | > 40% | > 65% | Generic AST patterns, not app-specific tuning |
-| Run time | < 15 min | < 5 min | Pre-seeded data + targeted probes only |
+| Unseen app | > 40% | > 65% | Shared route contract + framework adapters |
+| Run time | < 15 min | < 5 min | Selected target profile + pre-seeded fallback data |
 
 ### FR-to-Component Mapping
 
@@ -42,8 +45,8 @@
 | FR-1 | SAST scan: file, line, CWE, snippet | `semgrep_parser.py` |
 | FR-2 | DAST scan: URL, method, param, payload, evidence | `zap_parser.py` |
 | FR-3 | One common format with CWE number | `schema.py` (UnifiedFinding) |
-| **FR-4** | **Route map: URL → function → scopes + read parameters** | **`route_schema.py` + three-pass AST mapper** |
-| **FR-5** | **Correlate: CWE + route + scope + parameter → Confirmed** | **`correlator.py`** |
+| **FR-4** | **Route map: URL → function → scopes + read parameters** | **`RouteAdapter` + shared schema + Flask/Express adapters** |
+| **FR-5** | **Correlate: target + CWE + route + scope + parameter → Confirmed; method/source when known** | **`correlator.py`** |
 | **FR-6** | **Merge duplicates: scan twice = same count** | **`correlator.py` (consumed_dast_ids)** |
 | FR-7 | Label: Confirmed / Code only / Runtime only | `classifier.py` |
 | FR-8 | Issue detail: URL + param + payload + file + line + CWE | `FindingDetailPanel.tsx` |
@@ -60,7 +63,7 @@
 | **B-4** | Plain-English fix suggestion | GPT-4o patch + template (Phase 6) |
 | B-5 | Compare two scans | Out of scope for v1 |
 | **B-6** | Export SARIF + CI fail on confirmed HIGH | SARIF export endpoint `/api/export/sarif` |
-| B-7 | Second language | Out of scope for v1 |
+| **B-7** | **Second language** | **Express/Node.js adapter + OWASP Juice Shop target profile** |
 
 ### Official Vulnerability Types (PRD §5)
 
@@ -85,7 +88,7 @@
 | Objective | What Judges Score | Key Deliverable |
 |---|---|---|
 | **01 — Scan Code and App** | ≥4 CWE types, one common format | `UnifiedFinding` schema with `cwe_id` |
-| **02 — Correlate and Merge** | Link runtime → code, merge duplicates | Three-pass AST route mapper + strict merge engine |
+| **02 — Correlate and Merge** | Link runtime → code, merge duplicates | Three-pass Flask/Express route adapters + strict merge engine |
 | **03 — Prioritise What to Fix** | Confirmed/Code only/Runtime only labels, Confirmed first | Classifier + ranked UI |
 
 ---
@@ -96,7 +99,7 @@ Build in **descending scoring weight** so a partial demo still scores maximally:
 
 | Phase | Component | Objectives | Points | Must work before demo |
 |---|---|---|---|---|
-| 1 | Repo scaffold + target vulnerable app | All | — | Yes — everything runs on this |
+| 1 | Repo scaffold + Flask and Juice Shop targets | All | — | Yes — everything runs on this |
 | 2 | Unified ingestion pipeline | Obj 01 | 30 pts (shared) | Yes |
 | 3 ⭐ | Three-pass AST route mapper + strict correlation | Obj 02 | 30 pts (shared) | Yes — highest weight |
 | 4 | LangGraph verification loop | Obj 02+03 | 25 pts | Yes |
@@ -112,20 +115,34 @@ Build in **descending scoring weight** so a partial demo still scores maximally:
 
 **Scoring impact:** Prerequisite for everything. All points depend on this. Containerisation is a hard requirement for Problem 06.
 
-### 1.1 Target app decision: we45/Vulnerable-Flask-App ✅ CONFIRMED
+### 1.1 Target apps: Flask baseline + OWASP Juice Shop
 
-> **Chosen: [we45/Vulnerable-Flask-App](https://github.com/we45/Vulnerable-Flask-App)**
+Support two selectable targets through application profiles:
 
-**Why this beats every alternative:**
+- **Flask baseline:** [we45/Vulnerable-Flask-App](https://github.com/we45/Vulnerable-Flask-App), used for Python AST coverage and the controlled dead-code demo.
+- **Express/Node.js target:** [OWASP Juice Shop](https://github.com/juice-shop/juice-shop), used to exercise the JavaScript adapter and a second real application.
 
-| App | Language | AST Mapper | CWE Coverage | Obj 01 Coverage | Verdict |
-|---|---|---|---|---|---|
-| **we45/Vulnerable-Flask-App** | Python (Flask) | ✅ Python `ast` — zero overhead | CWE-89, 94, 347, 916, 798, 200 | ✅ 4+ CWE types | ✅ **CHOSEN** |
-| DVWA | PHP | ❌ Needs tree-sitter PHP | CWE-89, 79, 78 | ✅ But PHP kills Python AST story | ❌ |
-| WebGoat | Java (Spring) | ❌ Needs tree-sitter Java | Good | ✅ But Java overhead | ❌ |
-| Juice Shop | Node.js | ❌ Needs tree-sitter JS | Good | ✅ But JS overhead | ❌ |
+The common ingestion, route schema, correlator, classifier, API, and UI remain
+language-independent. Route and source-scope discovery are selected by each
+profile's language adapter. Flask remains the first implementation and reference
+fixture; Juice Shop and Express are an in-scope second target, not a replacement.
 
-### 1.2 Verified vulnerability map (from direct source inspection of `app/app.py`)
+| Profile | App | Language/framework | Route adapter | Role |
+|---|---|---|---|---|
+| `flask_demo` | we45/Vulnerable-Flask-App | Python / Flask | Python `ast` adapter | Baseline, controlled fixtures, fast offline demo |
+| `juice_shop` | OWASP Juice Shop | JavaScript / Express | Node.js AST adapter | Second-language validation against a real app |
+
+Keep both target containers isolated on the internal Docker network. Select
+which profile to scan or verify explicitly; do not silently combine results
+from different target versions or runtimes into a single scan.
+
+### 1.2 Flask reference vulnerability map (from `app/app.py`)
+
+This table and the 36-finding answer-key counts are the Flask reference fixture,
+not an aggregate claim about Juice Shop. Keep target coverage reports and
+ground-truth evaluation separate by `target_id`. Add a Juice Shop ground-truth
+manifest after pinning its source revision; do not copy Flask routes or CWE
+counts into that manifest.
 
 | Route | Handler | Vulnerability | CWE | Obj 01 Type | Expected Label |
 |---|---|---|---|---|---|
@@ -144,7 +161,7 @@ Build in **descending scoring weight** so a partial demo still scores maximally:
 ### 1.3 Supplement we45 with dead-code module for guaranteed ≥70% suppression
 
 ```python
-# target-app/dead_code_helpers.py  ← ADD THIS FILE (never modify app.py)
+# targets/vulnerable_flask/dead_code_helpers.py  ← add to fixture, not upstream app.py
 """
 Legacy helper functions — not imported or called by any route.
 These simulate real-world dead code that SAST flags but DAST cannot reach.
@@ -196,7 +213,10 @@ def _legacy_render_xss(user_input: str):
     return f"<div>{user_input}</div>"
 ```
 
-**Suppression math:** 7 findings in `dead_code_helpers.py` (all Code only/suppressed) + ~4 reachable findings in `app.py` = ~11 total → **~64% suppression**. Add one more dead function to clear 70%.
+**Suppression math (Flask fixture only):** 7 findings in `dead_code_helpers.py`
+(unreachable) + ~4 reachable findings in `app.py` = ~11 total → ~64%. Add one
+more dead function to clear 70%. Report Juice Shop reachability and suppression
+independently; never pool denominators across targets.
 
 **Objective 01 coverage from dead_code_helpers.py:** CWE-89 (SQLi) ✅, CWE-79 (XSS) ✅, CWE-78 (CMDi), CWE-94 (SSTI), CWE-502 (Deserialisation), CWE-95 (eval) — 6/6 types covered, well above the 4 minimum.
 
@@ -204,19 +224,45 @@ def _legacy_render_xss(user_input: str):
 
 ```
 mitigata-p06/
+├── configs/
+│   ├── flask_demo.yaml           ← Python source, target URL, Semgrep packs, excludes
+│   └── juice_shop.yaml           ← JavaScript source, target URL, Semgrep packs, excludes
+├── targets/
+│   ├── vulnerable_flask/         ← we45 Flask target + controlled demo helpers
+│   └── juice-shop/               ← OWASP Juice Shop source checkout (not modified)
+├── data/
+│   ├── ground_truth/
+│   │   ├── flask_demo.yaml       ← controlled fixture ground truth
+│   │   └── juice_shop.yaml       ← findings verified for pinned Juice Shop revision
+│   ├── raw/                       ← per-scan raw tool output
+│   └── sample/
+│       ├── flask_semgrep.json
+│       ├── flask_zap.json
+│       ├── juice_semgrep.json
+│       └── juice_zap.json        ← per-target offline fixtures
 ├── engine/
+│   ├── adapters/
+│   │   ├── base.py               ← RouteAdapter interface and language selection
+│   │   ├── flask_adapter.py      ← Python AST: routes, scopes, request reads
+│   │   ├── express_adapter.py    ← invokes JS extractor and maps shared schema
+│   │   └── js/
+│   │       ├── extract_routes.js ← Node AST extraction for Express
+│   │       ├── package.json      ← pinned TypeScript Compiler API dependency
+│   │       └── package-lock.json
 │   ├── api/
 │   │   └── main.py                ← FastAPI: /api/graph, /api/verify, /api/patch, /api/compliance
 │   ├── ingestion/
 │   │   ├── schema.py              ← Pydantic v2 UnifiedFinding (Obj 01 common format)
 │   │   ├── semgrep_parser.py      ← Semgrep JSON → UnifiedFinding[]
 │   │   ├── zap_parser.py          ← ZAP JSON → UnifiedFinding[]
-│   │   └── correlator.py          ← CWE+route join → merged findings (Obj 02)
+│   │   └── correlator.py          ← CWE+route+scope+parameter gate → merged findings
 │   ├── ast_mapper/
-│   │   ├── route_schema.py        ← RouteNode, CodeScope, ParameterRead
-│   │   ├── route_extractor.py     ← Routes, Blueprint prefixes, URL normalization (Pass 1)
-│   │   ├── sink_detector.py       ← Vulnerable sink pattern matcher
-│   │   ├── call_graph.py          ← One-hop helper scopes + request reads (Passes 2–3)
+│   │   ├── route_schema.py        ← Shared RouteNode, CodeScope, ParameterRead
+│   │   ├── route_extractor.py     ← Adapter dispatch and normalized route index
+│   │   ├── sink_detector.py       ← Shared sink contract and result schema
+│   │   ├── python_sink_visitor.py ← Python AST sink patterns
+│   │   ├── javascript_sink_visitor.py ← Express/JavaScript sink patterns
+│   │   ├── call_graph.py          ← Adapter-provided one-hop scopes + request reads
 │   │   └── merger.py              ← Enrich SAST findings with AST reachability
 │   ├── langgraph_loop/
 │   │   ├── state.py               ← AlertState TypedDict
@@ -240,16 +286,19 @@ mitigata-p06/
 │   │   │   └── ReTestButton.tsx         ← Live re-verify button
 │   │   └── App.tsx
 │   └── package.json
-├── target-app/                    ← cloned we45/Vulnerable-Flask-App (app.py untouched)
-│   └── dead_code_helpers.py      ← ADDED by us (Obj 01: 6 CWE types)
-├── data/
-│   ├── semgrep-results.json      ← pre-seeded (demo works offline)
-│   └── zap-alerts.json           ← pre-seeded (demo works offline)
 ├── tests/
 │   ├── test_ingestion.py
+│   ├── test_flask_adapter.py
+│   ├── test_express_adapter.py
+│   ├── test_route_schema.py
 │   ├── test_ast_mapper.py
+│   ├── test_correlator.py
 │   ├── test_classifier.py
 │   └── test_compliance.py
+├── scripts/
+│   ├── run_scan.py               ← run_scan.py configs/{profile}.yaml
+│   ├── load_sample.py            ← offline sample loader
+│   └── evaluate.py               ← compare results with target ground truth
 ├── docker-compose.yml            ← one-command startup
 ├── .env.example
 ├── AGENTS.md
@@ -258,25 +307,37 @@ mitigata-p06/
 └── README.md
 ```
 
-### 1.5 Docker Compose (full containerised setup)
+### 1.5 Docker Compose (Flask + Juice Shop, isolated targets)
 
 ```yaml
 # docker-compose.yml
 version: "3.9"
 
 services:
-  target:
-    build: ./target-app
-    container_name: mitigata-target
+  target-flask:
+    build: ./targets/vulnerable_flask
+    container_name: mitigata-target-flask
     networks:
-      - internal                    # NOT on public — only engine can reach it
+      - internal                    # target is never exposed to the host
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5050/"]
       interval: 10s
       timeout: 5s
       retries: 3
-    # Port 5050 confirmed from we45 source: APP_PORT default = 5050
-    # NOT exposed to host — all probes must go through engine on internal network
+    # Flask target port 5050; no host port mapping.
+
+  target-juice-shop:
+    build: ./targets/juice-shop
+    container_name: mitigata-target-juice-shop
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    # Build Juice Shop from the checked-out source used by the Express adapter.
+    # Pin checkout/image versions together; do not map the app port to the host.
 
   engine:
     build: ./engine
@@ -287,14 +348,17 @@ services:
       - internal                    # can reach target
       - public                      # accessible from frontend + host
     environment:
-      - TARGET_APP_URL=http://target:5050
-      - TARGET_SRC_PATH=/target-src
+      - TARGETS_ROOT=/targets
+      - TARGET_PROFILE=${TARGET_PROFILE:-flask_demo}
     volumes:
-      - ./target-app:/target-src:ro  # read-only — AST mapper reads exact running source
-      - ./data:/app/data             # pre-seeded scan results
+      - ./targets:/targets:ro        # source for both adapters, read-only
+      - ./configs:/app/configs:ro
+      - ./data:/app/data             # raw and per-profile sample scan results
     env_file: .env
     depends_on:
-      target:
+      target-flask:
+        condition: service_healthy
+      target-juice-shop:
         condition: service_healthy   # wait for target before starting probes
 
   frontend:
@@ -309,7 +373,7 @@ services:
 
 networks:
   internal:
-    internal: true   # target container unreachable from host machine
+    internal: true   # both target containers unreachable from host machine
   public:            # engine API + frontend accessible from host
 ```
 
@@ -318,9 +382,9 @@ networks:
 ```bash
 # .env.example — copy to .env and fill in values
 
-# Target app (auto-set by docker-compose, override for local dev)
-TARGET_APP_URL=http://localhost:5050
-TARGET_SRC_PATH=./target-app
+# Select one profile per scan; supported: flask_demo, juice_shop
+TARGET_PROFILE=flask_demo
+TARGETS_ROOT=/targets
 
 # Azure OpenAI — GPT-4o primary, GPT-4o-mini fallback
 AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
@@ -332,10 +396,45 @@ AZURE_OPENAI_FALLBACK_DEPLOYMENT=gpt-4o-mini
 # AZURE_OPENAI_KEY=
 ```
 
-### 1.7 Dockerfile for the we45 target app
+Profile contracts (`configs/flask_demo.yaml` and
+`configs/juice_shop.yaml`):
+
+```yaml
+target_id: flask_demo
+language: python
+framework: flask
+source_dir: /targets/vulnerable_flask
+target_url: http://target-flask:5050
+semgrep_configs:
+  - p/python
+  - p/flask
+  - p/security-audit
+exclude:
+  - .venv
+adapter: flask
+```
+
+```yaml
+target_id: juice_shop
+language: javascript
+framework: express
+source_dir: /targets/juice-shop
+target_url: http://target-juice-shop:3000
+semgrep_configs:
+  - p/javascript
+  - p/security-audit
+exclude:
+  - node_modules
+adapter: express
+```
+
+Treat these as per-scan inputs; the API, stored results, and scanner output
+retain `target_id` so findings from different applications never correlate.
+
+### 1.7 Target container build inputs
 
 ```dockerfile
-# target-app/Dockerfile
+# targets/vulnerable_flask/Dockerfile
 FROM python:3.9-slim
 WORKDIR /app
 COPY requirements.txt .
@@ -346,29 +445,38 @@ EXPOSE 5050
 CMD ["python", "app/app.py"]
 ```
 
-### 1.8 Generate and pre-seed scan data
+Build Juice Shop from its checked-out repository and retain a lockfile/commit
+identifier for each profile. The Express adapter reads that exact checkout
+mounted read-only into the engine; scanner and route results must refer to the
+same target revision.
+
+### 1.8 Profile-based scanning and pre-seeded data
 
 ```bash
-# Step 1: Semgrep against the real target-app source (covers Objective 01)
+# Select a target; configs contain source_dir, target_url, language,
+# Semgrep packs, excludes, and target revision.
+python scripts/run_scan.py configs/flask_demo.yaml
+python scripts/run_scan.py configs/juice_shop.yaml
+
+# Flask profile Semgrep equivalent
 semgrep --config=p/python \
         --config=p/security-audit \
         --config=p/flask \
-        --json target-app/ > data/semgrep-results.json
+        --json targets/vulnerable_flask/ > data/raw/flask-semgrep.json
 
-# Step 2: Start the target app locally for ZAP
-cd target-app && pip install -r requirements.txt
-python app/app.py &   # runs on port 5050
+# Juice Shop profile Semgrep equivalent
+semgrep --config=p/javascript \
+        --config=p/security-audit \
+        --json targets/juice-shop/ > data/raw/juice-semgrep.json
 
-# Step 3: ZAP targeted scan (targeted probes only — NOT a full spider)
-docker run -t owasp/zap2docker-stable zap-api-scan.py \
-    -t http://host.docker.internal:5050 \
-    -f openapi \
-    -r zap-report.json
+# Run ZAP against the selected internal target URL from the profile.
+# Keep scans scoped to that local target; no host.docker.internal route.
+python scripts/run_scan.py configs/flask_demo.yaml --dast
+python scripts/run_scan.py configs/juice_shop.yaml --dast
 
-# Step 4: Pre-commit both files — engine works offline from these
-cp zap-report.json data/zap-alerts.json
-git add data/semgrep-results.json data/zap-alerts.json
-git commit -m "chore: pre-seed SAST/DAST scan data for demo (Objective 01)"
+# Load committed per-profile fixtures for offline/demo runs.
+python scripts/load_sample.py configs/flask_demo.yaml
+python scripts/load_sample.py configs/juice_shop.yaml
 ```
 
 ---
@@ -394,6 +502,7 @@ class UnifiedFinding(BaseModel):
     label is the Objective 03 prioritisation output.
     """
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    target_id: str                         # profile identity; prevents cross-target joins
     source: Literal["sast", "dast"]
     cwe_id: str                              # MANDATORY — Obj 01 CWE number requirement
     label: Optional[Literal[
@@ -412,6 +521,7 @@ class UnifiedFinding(BaseModel):
     url: Optional[str] = None
     method: Optional[str] = None
     parameter: Optional[str] = None
+    parameter_source: Optional[Literal["path", "query", "form", "json", "header"]] = None
     evidence: Optional[str] = None
     http_status: Optional[int] = None
 
@@ -425,6 +535,7 @@ class UnifiedFinding(BaseModel):
 
     model_config = {"json_schema_extra": {"example": {
         "id": "abc-123",
+        "target_id": "flask_demo",
         "source": "sast",
         "cwe_id": "CWE-89",
         "label": "Confirmed",
@@ -442,7 +553,7 @@ class UnifiedFinding(BaseModel):
 import json
 from .schema import UnifiedFinding
 
-# CWE map verified against actual we45 app Semgrep output
+# CWE map: use metadata first; rule fallback covers both Python and JavaScript rules
 CWE_MAP = {
     "python.lang.security.audit.dangerous-system-call":                "CWE-78",
     "python.lang.security.audit.eval-detected":                        "CWE-95",
@@ -473,7 +584,7 @@ SINK_TYPE_MAP = {
 }
 
 
-def parse_semgrep_json(path: str) -> list[UnifiedFinding]:
+def parse_semgrep_json(path: str, target_id: str) -> list[UnifiedFinding]:
     with open(path) as f:
         data = json.load(f)
     findings = []
@@ -489,9 +600,10 @@ def parse_semgrep_json(path: str) -> list[UnifiedFinding]:
             cwe = CWE_MAP.get(rule_id, "CWE-UNKNOWN")
 
         findings.append(UnifiedFinding(
+            target_id=target_id,
             source="sast",
             cwe_id=cwe,
-            file=result["path"],
+            file=normalize_finding_path(result["path"], target_id),
             line=result["start"]["line"],
             rule_id=rule_id,
             severity=result.get("extra", {}).get("severity", "WARNING").upper(),
@@ -518,6 +630,14 @@ ZAP_SINK_MAP = {
     "347": "jwt_weak_secret",
 }
 
+ZAP_PARAM_SOURCE_MAP = {
+    "URL_PATH": "path",
+    "GET": "query",
+    "POST_DATA": "form",
+    "JSON": "json",
+    "HEADER": "header",
+}
+
 _RISK_NORMALISE = {
     "High (Medium)": "HIGH", "High (High)": "HIGH",
     "Medium (Medium)": "MEDIUM", "Low (Low)": "LOW",
@@ -525,7 +645,7 @@ _RISK_NORMALISE = {
 }
 
 
-def parse_zap_json(path: str) -> list[UnifiedFinding]:
+def parse_zap_json(path: str, target_id: str) -> list[UnifiedFinding]:
     with open(path) as f:
         data = json.load(f)
 
@@ -539,11 +659,13 @@ def parse_zap_json(path: str) -> list[UnifiedFinding]:
         cweid = str(alert.get("cweid", "0"))
         risk = alert.get("riskdesc", "Medium")
         findings.append(UnifiedFinding(
+            target_id=target_id,
             source="dast",
             cwe_id=f"CWE-{cweid}",
             url=alert.get("url"),
-            method=alert.get("method", "GET"),
+            method=alert.get("method"),
             parameter=alert.get("param"),
+            parameter_source=ZAP_PARAM_SOURCE_MAP.get(alert.get("paramType")),
             evidence=alert.get("evidence", "")[:500],
             severity=_RISK_NORMALISE.get(risk, risk.split(" ")[0].upper()),
             sink_type=ZAP_SINK_MAP.get(cweid, "unknown"),
@@ -552,13 +674,21 @@ def parse_zap_json(path: str) -> list[UnifiedFinding]:
     return findings
 ```
 
+`normalize_finding_path` removes the profile's source-root prefix and stores a
+stable target-relative path. Both adapters and Semgrep results must use the same
+relative-path convention so scope checks work across Windows/Linux containers.
+The Semgrep parser prefers CWE metadata for either language and uses a
+language-specific `check_id` fallback only when metadata is missing.
+
 ### 2.4 Correlation and Merge Engine (Objective 02 — the core)
 
 The correlation gate is deliberately stricter than a CWE-only or substring URL join.
 Pass 1 supplies normalized route templates, Pass 2 supplies route code scopes, and
 Pass 3 supplies the input parameter names read by each handler. A SAST/DAST pair is
-`Confirmed` only when all four checks pass: route, code scope, attacked parameter,
-and CWE. A CWE match without these links is not sufficient evidence to merge.
+`Confirmed` only when CWE, normalized route, code scope, and attacked parameter
+all match; HTTP method must also match when the DAST method is known. When
+available, the parameter source (query/body/path/header) must match as well.
+A CWE match without these links is not sufficient evidence to merge.
 
 ```python
 # engine/ingestion/correlator.py
@@ -573,8 +703,8 @@ def correlate_and_merge(
     routes: list[RouteNode],
 ) -> list[UnifiedFinding]:
     """
-    Confirm a pair only when CWE, normalized route, code scope, and input
-    parameter all match. RouteNode helpers are implemented with the AST mapper.
+    Confirm a pair only when target, CWE, normalized route, code scope, and
+    input parameter all match. A known HTTP method/source must also match.
     """
     merged: list[UnifiedFinding] = []
     consumed_dast_ids: set[str] = set()
@@ -584,15 +714,25 @@ def correlate_and_merge(
         for d in dast:
             if d.id in consumed_dast_ids:
                 continue
+            if d.target_id != s.target_id:
+                continue
             if d.cwe_id != s.cwe_id or not d.url:
                 continue
             path = urlparse(d.url).path
             candidates.extend(
                 (route, d) for route in routes
-                if route.matches_path(path)
+                if route.target_id == s.target_id
+                and route.matches_path(path)
                 and route.matches_method(d.method)
                 and route.contains_location(s.file, s.line)
-                and d.parameter in {read.name for read in route.input_parameters}
+                and any(
+                    read.name == d.parameter
+                    and (
+                        d.parameter_source is None
+                        or read.source == d.parameter_source
+                    )
+                    for read in route.input_parameters
+                )
             )
 
         if candidates:
@@ -603,6 +743,7 @@ def correlate_and_merge(
                 "url": best_dast.url,
                 "method": best_dast.method,
                 "parameter": best_dast.parameter,
+                "parameter_source": best_dast.parameter_source,
                 "evidence": best_dast.evidence,
                 "http_status": best_dast.http_status,
                 "merged_from": [s.id, best_dast.id],
@@ -613,7 +754,9 @@ def correlate_and_merge(
             merged.append(s.model_copy(update={
                 "label": "Code only",
                 "reachable": any(
-                    route.contains_location(s.file, s.line) for route in routes
+                    route.target_id == s.target_id
+                    and route.contains_location(s.file, s.line)
+                    for route in routes
                 ),
             }))
 
@@ -625,6 +768,10 @@ def correlate_and_merge(
     merged.sort(key=lambda f: label_rank.get(f.label or "Code only", 1))
     return merged
 ```
+
+`RouteNode.matches_method(None)` treats an absent DAST method as unknown;
+otherwise it requires the method to match. `parameter_source` is compared when
+the scanner supplies it; the parameter name must always match.
 
 ---
 
@@ -639,33 +786,35 @@ join by themselves.
 
 | Pass | Name | Responsibility | Output |
 |---|---|---|---|
-| 1 | Route and prefix mapping (SpecWeaver-lite) | Extract route declarations, resolve mounted Flask Blueprint prefixes, and normalize dynamic segments | `normalized_url`, method, handler |
-| 2 | One-hop callee mapping (CPG-lite) | Resolve directly called imported/local helpers from each handler; add their source spans to route scope | Handler and direct-callee scopes |
-| 3 | Input parameter extraction (Respector-lite) | Find request-derived names read in the handler and its one-hop callees | `input_parameters` with source kinds |
+| 1 | Route and prefix mapping (SpecWeaver-lite) | Flask decorators/Blueprint registrations or Express route declarations/`app.use()` mounts; normalize dynamic segments | `target_id`, `normalized_url`, method, handler |
+| 2 | One-hop callee mapping (CPG-lite) | Resolve directly called local/imported project helpers using language-specific symbol resolution | Handler and direct-callee scopes |
+| 3 | Input parameter extraction (Respector-lite) | Find framework request reads in the handler and one-hop callees | `input_parameters` with source kinds |
 
-MVP framework contract: implement Flask/Python route declarations and
-`register_blueprint(..., url_prefix=...)` first, using the existing Python AST
-pipeline. Keep prefix resolution and path normalization behind framework-neutral
-helpers so a future Express adapter can add `app.use()` mounts and `:id` syntax
-without changing `RouteNode` or the correlator. Do not claim Node/Express parsing
-until that adapter exists.
+Both adapters implement the same contract and return shared route records; the
+correlator does not parse Python or JavaScript. Python uses the built-in `ast`
+module. Express uses a small Node.js extractor based on the TypeScript Compiler
+API (or Babel parser if required by the selected Juice Shop source syntax), with
+JSON output consumed by the Python engine. Pin the Node version and parser
+dependency in the extractor package/lockfile.
 
 #### Unified route node
 
-Add `engine/ast_mapper/route_schema.py`. Each route stores its original and
-normalized path, HTTP methods, handler identity, code scopes, and parameter reads.
-`CodeScope` carries `file`, `start_line`, `end_line`, and `function`;
-`ParameterRead` carries `name` and `source` (`path`, `query`, `form`, `json`,
-or `header`).
+Add `engine/ast_mapper/route_schema.py`. Each route stores its target profile,
+original and normalized path, HTTP methods, handler identity, code scopes, and
+parameter reads. `CodeScope` carries a target-relative `file`, `start_line`,
+`end_line`, and `function`; `ParameterRead` carries `name` and `source` (`path`,
+`query`, `form`, `json`, or `header`). The schema must not expose absolute host
+paths in API output.
 
 Example after all three passes:
 
 ```text
 RouteNode(
+    target_id="juice_shop",
     normalized_url="/api/orders/{param}",
     methods=["GET"],
-    handler="orders.list_orders",
-    scopes=[orders.py:10-25, db.py:45-60],
+    handler="orders.listOrders",
+    scopes=[orders.js:10-25, db.js:45-60],
     input_parameters=[
         ParameterRead(name="id", source="path"),
         ParameterRead(name="q", source="query"),
@@ -675,22 +824,37 @@ RouteNode(
 
 The example preserves parameter names for correlation while using a consistent
 `{param}` placeholder for URL matching. Typed Flask converters such as
-`<int:id>` and JavaScript-style `:id` map to the same placeholder; the declared
-name and location are retained separately in the route metadata.
+`<int:id>` and Express `:id` map to the same placeholder; the declared name and
+location are retained separately in the route metadata.
+
+#### Adapter contract
+
+```python
+class RouteAdapter(Protocol):
+    def discover_routes(self, profile: TargetProfile) -> list[RouteNode]: ...
+```
+
+`flask_adapter.py` parses Flask route decorators and Blueprint mount calls.
+`express_adapter.py` invokes `js/extract_routes.js`, validates its JSON, and
+converts output into the shared schema. The JS extractor parses Express
+`app.get/post/...`, `router.get/post/...`, `router.route(...).get/post(...)`,
+and `app.use(prefix, router)` mounts. Static literal prefixes are joined in
+declaration order; dynamic/unresolved mounts are explicitly marked and cannot
+produce a strict route match.
 
 ### 3.1 Pass 1 — Route declarations, prefixes, and URL normalization
 
-The route extractor must not emit a decorator path in isolation. It resolves
-Flask Blueprint registration prefixes and joins them to the route path before
-normalization. For example, a Blueprint mounted at `/api` with
-`@bp.route("/orders/<int:id>")` becomes `/api/orders/{param}`. Normalize trailing
-slashes consistently and preserve the original path for diagnostics. A Blueprint
-mounted at multiple statically known prefixes produces a route node per mount.
-A route without a statically resolvable path or prefix is marked unresolved; do
-not silently invent a path.
+Each adapter must join the framework mount prefix to its route before
+normalization. A Flask Blueprint mounted at `/api` with
+`@bp.route("/orders/<int:id>")` and an Express router mounted with
+`app.use("/api", ordersRouter)` where it declares `ordersRouter.get("/orders/:id", ...)`
+both resolve to `/api/orders/{param}`. Normalize trailing slashes consistently
+and preserve the original path for diagnostics. Multiple static mounts yield one
+route per effective path. A dynamic/unresolved prefix remains unresolved; never
+silently invent a path.
 
 ```python
-# engine/ast_mapper/route_extractor.py
+# engine/adapters/flask_adapter.py
 import ast
 import os
 from typing import Optional
@@ -720,7 +884,14 @@ def resolve_blueprint_prefixes(src_dir: str) -> dict[str, list[str]]:
     ...
 ```
 
-### 3.2 Sink detector (we45-aware — covers Objective 01 CWE types)
+### 3.2 Sink detector (shared findings, language-specific AST visitors)
+
+`sink_detector.py` defines the common sink record and CWE/sink-type mapping.
+`python_sink_visitor.py` uses Python `ast`; `javascript_sink_visitor.py` uses
+the same TypeScript Compiler API parser as the Express adapter. The JavaScript
+visitor must report target-relative source spans in the same `CodeScope` format.
+Semgrep remains the primary cross-language source of SAST findings; these
+visitors add deterministic route-to-sink evidence and do not replace Semgrep.
 
 ```python
 # engine/ast_mapper/sink_detector.py
@@ -814,73 +985,62 @@ def find_sinks_in_function(func_node: ast.FunctionDef, file: str) -> list[dict]:
 
 ### 3.3 Pass 2 — Direct callee scopes (CPG-lite)
 
-Index functions by module and resolve direct calls from each route handler to
-imported or same-project helpers. Add the called function's exact file and line
-span to that route's `scopes`. This is intentionally a one-hop expansion in v1:
-do not imply transitive reachability when a helper calls another helper. Keep
-unresolved external/library calls out of project scopes.
+Each language adapter indexes local functions and imports, resolves direct calls
+from route handlers, and adds exact helper file/line spans to `scopes`. This is
+intentionally one hop in v1: do not imply transitive reachability when a helper
+calls another helper. Keep unresolved external/library calls out of project
+scopes. Express import aliases and re-exports that cannot be statically resolved
+must remain explicit unresolved references, not guessed helper links.
 
 ```python
-# engine/ast_mapper/call_graph.py
-import ast
-import os
-from .route_extractor import extract_routes
-from .sink_detector import find_sinks_in_function
+# engine/ast_mapper/call_graph.py (shared orchestration over adapter output)
 
 
-def build_call_graph(src_dir: str) -> dict:
-    """
-    Pass 2: add each handler and its directly called project functions as scopes.
-    """
-    routes = extract_routes(src_dir)
-    function_index = _index_project_functions(src_dir)
-    for route in routes:
-        handler = function_index[route.handler]
-        callees = _resolve_direct_project_callees(handler, function_index)
-        route.scopes = [_scope_for(handler)]
-        for callee in callees:
-            route.scopes.append(_scope_for(callee))
-    extract_request_parameters(routes, function_index)
+def build_call_graph(profile: TargetProfile) -> dict:
+    """Dispatch to the profile adapter and return the shared route index."""
+    adapter = adapter_for(profile.language, profile.framework)
+    routes = adapter.discover_routes(profile)
+    adapter.add_one_hop_scopes(routes, profile)
+    adapter.extract_request_parameters(routes, profile)
     return {
         "routes": routes,
-        "stats": _summarize_sink_reachability(routes, function_index),
+        "stats": summarize_route_and_sink_coverage(routes, profile),
     }
 ```
 
 ### 3.4 Pass 3 — Request parameter extraction (Respector-lite)
 
-Walk each route handler and its one-hop callee ASTs for framework request reads.
-Record the exact request key and source kind, such as Flask `request.args["q"]`
-or `request.args.get("q")` as `ParameterRead("q", "query")`, and path arguments
-such as `id` as `ParameterRead("id", "path")`. Include `request.form`, JSON body
-access, and headers using the same representation. Only names statically observed
-as read are eligible for a DAST parameter match; an unknown or dynamic key is not
-a wildcard.
+Walk each route handler and its one-hop callee syntax trees for framework request
+reads. Flask reads include `request.args["q"]` / `.get("q")`, `request.form`,
+`request.json`, headers, and path arguments. Express reads include
+`req.query.q`, `req.query["q"]`, `req.params.id`, `req.body.q`, and headers.
+Record each as a `ParameterRead(name, source)` where source is `path`, `query`,
+`form`, `json`, or `header`. Only statically observed names can satisfy
+correlation; dynamic/unknown keys do not act as wildcards.
 
-```python
-def extract_request_parameters(
-    routes: list[RouteNode],
-    function_index: dict,
-) -> None:
-    for route in routes:
-        handler = function_index[route.handler]
-        callees = _resolve_direct_project_callees(handler, function_index)
-        route.input_parameters = _extract_request_reads([handler, *callees])
-```
+The adapter contract also includes `add_one_hop_scopes(routes, profile)` and
+`extract_request_parameters(routes, profile)`. Each adapter parses source once
+where practical and populates identical `CodeScope` and `ParameterRead` model
+types.
 
 The correlator receives the final route list as `call_graph["routes"]`;
 `input_parameters` is a list of `ParameterRead` values.
 
-**Critical Phase 3 acceptance checks:**
+**Critical Phase 3 acceptance checks (both adapters):**
 
 - Blueprint `/api` + route `/orders/<int:id>` produces `/api/orders/{param}`.
+- Express `app.use("/api", ordersRouter)` + `ordersRouter.get("/orders/:id", ...)` produces `/api/orders/{param}`.
+- Flask `request.args.get("q")` and Express `req.query.q` both record `ParameterRead("q", "query")`.
 - DAST `/api/orders/42?q=test` matches that template and extracts `q` as the attacked query parameter.
-- A SAST finding in an imported direct helper's source span is in route scope; an unrelated function/file is not.
+- SAST locations in an imported direct helper's source span are in route scope for both languages; unrelated files/functions are not.
+- Same CWE/URL/parameter findings from different `target_id` values never correlate.
 - The route records path `id` and query `q` reads independently.
 - Correlation requires route + scope + attacked parameter + CWE; wrong parameter, route, or CWE does not produce `Confirmed`.
 - Unresolved mounts, imports, missing SAST locations, or dynamic request keys remain explicit/unmatched rather than becoming broad matches.
 
-**Critical suppression target:** `call_graph["stats"]["suppression_ratio"] >= 0.70`
+**Critical suppression target:** For the controlled Flask fixture,
+`call_graph["stats"]["suppression_ratio"] >= 0.70`. Report Juice Shop's measured
+ratio separately; do not assume the planted Flask dead-code ratio applies to it.
 
 ### 3.5 Merger: enrich SAST findings with AST reachability
 
@@ -903,7 +1063,8 @@ def enrich_findings_with_ast(
             continue
         matching_routes = [
             route.normalized_url for route in routes
-            if route.contains_location(f.file, f.line)
+            if route.target_id == f.target_id
+            and route.contains_location(f.file, f.line)
         ]
         f = f.model_copy(update={
             "reachable": bool(matching_routes),
@@ -928,9 +1089,11 @@ from typing import TypedDict, Literal, Optional
 
 class AlertState(TypedDict):
     finding_id: str
+    target_id: str
     route: str
     method: str
     parameter: str
+    parameter_source: str
     sink_type: str
     probe_payload: str
     probe_variant: int           # 0 = first attempt, 1 = retry
@@ -947,10 +1110,7 @@ class AlertState(TypedDict):
 ```python
 # engine/langgraph_loop/nodes.py
 import httpx
-import os
 from .state import AlertState
-
-TARGET_URL = os.getenv("TARGET_APP_URL", "http://target:5050")
 
 CANARY_PAYLOADS: dict[str, list[str]] = {
     "sql_injection":          ["' OR '1'='1",          "' OR 1=1--"],
@@ -989,13 +1149,22 @@ def probe_generator(state: AlertState) -> AlertState:
 
 def runtime_executor(state: AlertState) -> AlertState:
     try:
-        is_body = state["method"].upper() in ("POST", "PUT", "PATCH")
-        body = {state["parameter"]: state["probe_payload"]}
+        profile = load_target_profile(state["target_id"])
+        url = build_local_probe_url(profile, state)
+        params = {state["parameter"]: state["probe_payload"]}
+        json_body = params if state["parameter_source"] == "json" else None
+        form_body = params if state["parameter_source"] == "form" else None
+        headers = (
+            {state["parameter"]: state["probe_payload"]}
+            if state["parameter_source"] == "header" else None
+        )
         r = httpx.request(
-            method=state["method"].upper(),
-            url=f"{TARGET_URL}{state['route']}",
-            json=body if is_body else None,
-            params=body if not is_body else None,
+            method=state["method"],
+            url=url,
+            json=json_body,
+            data=form_body,
+            params=params if state["parameter_source"] == "query" else None,
+            headers=headers,
             timeout=2.0,
             follow_redirects=True,
         )
@@ -1042,6 +1211,12 @@ def should_retry(state: AlertState) -> str:
         return "retry"
     return "end"
 ```
+
+`build_local_probe_url` materializes a concrete path parameter from the selected
+profile's route template and sample values, and validates that it stays on that
+profile's configured local target. Never probe an arbitrary host taken from a
+finding URL. For a known DAST URL, retain its path/query values but rebuild the
+origin from the selected profile.
 
 ### 4.3 Wire the graph (with conditional retry edge)
 
@@ -1266,13 +1441,16 @@ def get_template_patch(sink_type: str):
 - **`@tanstack/react-query`** — data fetching with stale-while-revalidate
 - **Tailwind CSS** — styling without custom CSS
 - **Split-screen:** graph 60% left | detail panel 40% right
+- **Target selector:** switch between `flask_demo` and `juice_shop`; all API
+  results, finding IDs, stats, and verification requests are scoped to selected `target_id`
 - **Label colours:** Confirmed=red (#ef4444), Code only=yellow (#eab308), Runtime only=orange (#f97316)
 
 ### 7.2 Graph API response shape
 
 ```typescript
-// GET http://localhost:8000/api/graph
+// GET http://localhost:8000/api/graph?target_id=flask_demo
 interface GraphResponse {
+  target_id: "flask_demo" | "juice_shop";
   nodes: Array<{
     id: string;
     type: "endpoint" | "controller" | "sink" | "evidence" | "suppressed";
@@ -1291,6 +1469,7 @@ interface GraphResponse {
     id: string; source: string; target: string; animated?: boolean;
   }>;
   stats: {
+    target_id: "flask_demo" | "juice_shop";
     total: number;
     confirmed: number;
     code_only: number;
@@ -1429,10 +1608,11 @@ COMPLIANCE_MAP: dict[str, dict] = {
 ### 9.1 5-minute demo script (rehearse exactly)
 
 ```
-[0:00–0:30] docker compose up --build — show all 3 containers healthy
+[0:00–0:30] docker compose up --build — show engine, frontend, Flask, and Juice Shop services healthy
             Open http://localhost:3000 directly (NO login screen)
-            Stats bar: "X findings · Y confirmed · Z% noise reduction · 4+ CWE types"
-            Say: "Objective 01 complete — Semgrep + ZAP, one format, CWE numbers"
+            Select flask_demo; show profile-specific stats and CWE coverage
+            Switch to juice_shop; show its Express route map and independent scan counts
+            Say: "One pipeline, two language adapters, isolated per-target correlation"
 
 [0:30–1:30] Click "POST /login → login() → jwt.encode() [CWE-347]" node chain
             Show: Merged finding — single record with code (app.py:42) + runtime proof
@@ -1460,14 +1640,18 @@ COMPLIANCE_MAP: dict[str, dict] = {
 
 ### 9.2 Pre-demo checklist
 
-- [ ] `docker compose up --build` completes without errors — all 3 containers healthy
+- [ ] `docker compose up --build` completes; both target health checks pass and all four services start
 - [ ] `http://localhost:3000` opens directly to Correlation Workbench (no login)
-- [ ] Stats bar shows: total findings · confirmed count · suppression ratio ≥ 70%
-- [ ] Stats bar shows: ≥ 4 CWE types covered (Objective 01 verification)
+- [ ] Target selector switches between `flask_demo` and `juice_shop`; findings and stats remain target-scoped
+- [ ] Both adapters pass route-prefix, helper-scope, parameter-read, and normalized-path fixtures
+- [ ] Juice Shop Semgrep/ZAP results are stored and evaluated separately from Flask results
+- [ ] Cross-target SAST/DAST findings with matching CWE/path/parameter never correlate
+- [ ] Flask profile stats show the controlled fixture's suppression ratio ≥ 70%
+- [ ] Flask profile shows ≥ 4 required CWE types; Juice Shop coverage is reported independently
 - [ ] Graph renders in < 3 seconds (check browser Performance tab)
 - [ ] Confirmed findings appear first in graph and list (Objective 03)
 - [ ] At least 1 Confirmed finding with HTTP evidence and confidence score visible
-- [ ] Show `/api/orders/42?q=test` resolving to `/api/orders/{param}`, including the `db.py` helper scope and query parameter `q`
+- [ ] Show `/api/orders/42?q=test` resolving to `/api/orders/{param}` in Flask and Express fixtures, including helper scope and query parameter `q`
 - [ ] Verify wrong route, wrong parameter, wrong code scope, and wrong CWE each remain unlinked
 - [ ] At least 5 Code only findings suppressed (verify suppression ratio ≥ 70%)
 - [ ] "Verify" button fires probe, shows retry loop in probe_history, flips label live
@@ -1477,12 +1661,12 @@ COMPLIANCE_MAP: dict[str, dict] = {
 - [ ] All probes complete in < 2 seconds (check network tab)
 - [ ] No external network calls from probe nodes (check `docker logs mitigata-engine`)
 - [ ] `docker compose down && docker compose up --build` still works (idempotent)
-- [ ] Target container NOT accessible from host (`curl localhost:5050` should fail)
+- [ ] Neither target is exposed to the host (`localhost:5050` and `localhost:3001` should fail)
 
 ### 9.3 Fallback for demo failures
 
 - Pre-record a 90-second screen capture of the full flow as backup
-- Keep `data/semgrep-results.json` and `data/zap-alerts.json` pre-seeded — engine works offline
+- Keep per-target fixtures in `data/sample/` pre-seeded — either profile works offline
 - If Azure OpenAI unavailable: template patches fire automatically — demo continues
 - Have the LangGraph state JSON ready to show in terminal as last resort
 
@@ -1493,13 +1677,14 @@ COMPLIANCE_MAP: dict[str, dict] = {
 | Criterion | Max | Objective | Self-check | Evidence |
 |---|---|---|---|---|
 | ≥ 4 CWE types in one common format (SQLi + XSS mandatory) | 30 | Obj 01 | [ ] | Show `stats.cwe_types_covered` in UI |
-| Three-pass AST maps prefixes, one-hop helper scopes, and read parameters deterministically | 30 | Obj 02 | [ ] | Show `RouteNode` and `call_graph["stats"]` |
+| Flask and Express adapters implement three-pass route, scope, and parameter mapping | 30 | Obj 02 | [ ] | Show both adapters' `RouteNode` fixtures and per-target `call_graph["stats"]` |
+| Findings remain isolated by `target_id` | — | Obj 02 | [ ] | Show cross-target correlation test |
 | Each vulnerability appears exactly once (deduplication) | 30 | Obj 02 | [ ] | Show `merged_from` field in finding |
 | Runtime finding linked to exact code line | 30 | Obj 02 | [ ] | Show `code_location.file + line` |
 | Confirmed/Code only/Runtime only labels assigned | 20 | Obj 03 | [ ] | Show label badges in UI |
 | Confirmed findings always ranked first | 20 | Obj 03 | [ ] | Show sorted order in UI + API |
 | LangGraph probe fires live and flips label | 25 | Obj 02+03 | [ ] | Show live label animation during demo |
-| ≥ 70% SAST alerts suppressed as Code only | 20 | Obj 03 | [ ] | Show `suppression_ratio` stat |
+| Flask fixture ≥ 70% SAST alerts unreachable/classified Code only | 20 | Obj 03 | [ ] | Show target-scoped `suppression_ratio` |
 | Git diff generated and applied | 20 | Obj 03 | [ ] | Show diff preview in UI |
 | Re-verification probe confirms fix | 20 | Obj 03 | [ ] | Show "Fix Verified" status |
 | INR financial exposure + INC-06 reference | 15 | — | [ ] | Show ₹ figure with IBM 2024 source |
@@ -1510,9 +1695,9 @@ COMPLIANCE_MAP: dict[str, dict] = {
 
 ---
 
-## Key Decisions Log (v2.0 → v3.2)
+## Key Decisions Log (v2.0 → v3.3)
 
-| Decision | v2.0 | v3.0 | v3.2 |
+| Decision | v2.0 | v3.0 | v3.3 |
 |---|---|---|---|
 | Classification labels | T1/T2/T3/T4 | **Confirmed/Code only/Runtime only** | Aligned with official Problem 06 statement |
 | Label ranking | T1 first | **Confirmed first** — explicit Objective 03 requirement | Problem statement: "rank confirmed issues first" |
@@ -1522,8 +1707,9 @@ COMPLIANCE_MAP: dict[str, dict] = {
 | XSS (CWE-79) | In dead_code_helpers | **Promoted to mandatory (Obj 01)** | Problem statement: SQLi AND XSS are mandatory |
 | Containerisation | Docker Compose provided | **Hard requirement — all services containerised** | Problem statement: "containerized form" required |
 | AST-to-DAST matching | CWE + route text | — | Three passes resolve route prefixes, direct helper scopes, and exact read parameters; all four correlation checks must pass |
+| Target/language scope | Flask-only MVP | — | Add OWASP Juice Shop + Express/Node adapter behind shared route schema; isolate scans and findings by target profile |
 
 ---
 
-*Build plan version: 3.2 — Mitigata Hackathon Problem 06 (Flagship)*
-*Updated: Added three-pass AST route mapping, explicit Flask Blueprint prefix handling, one-hop helper scopes, request parameter extraction, and strict route/scope/parameter/CWE correlation.*
+*Build plan version: 3.3 — Mitigata Hackathon Problem 06 (Flagship)*
+*Updated: Added OWASP Juice Shop, Express/Node route adapter, target profiles, per-target scan fixtures and isolation, and dual-adapter tests; retained Flask as the reference demo target.*

@@ -5,7 +5,7 @@
 > Three Objectives: Scan Code+App · Correlate+Merge · Prioritise  
 > Real Incident: INC-06 — 2017 Credit Bureau Breach (~145M records)  
 > PRD: [P06-PRD.md](P06-PRD.md) — source of truth  
-> Architecture version: 1.2 — three-pass AST route mapping and strict correlation
+> Architecture version: 1.3 — multi-target Flask/Express route mapping and strict correlation
 
 ---
 
@@ -46,8 +46,8 @@ flowchart TD
     end
 
     subgraph OBJ2["🎯 Objective 02 — Correlate + Merge (FR-4, FR-5, FR-6)"]
-        AST["Three-Pass AST Route Mapper\nPass 1: routes + prefixes + normalized URL\nPass 2: one-hop helper scopes\nPass 3: request parameter reads\nPython ast · deterministic"]
-        CORR["Correlation & Merge Engine\nFR-5: CWE + route + scope + parameter\nmethod checked where available\nFR-6: deduplicate each pair once"]
+        AST["Three-Pass AST Route Mapper\nPass 1: routes + prefixes + normalized URL\nPass 2: one-hop helper scopes\nPass 3: request parameter reads\nFlask Python + Express JavaScript adapters"]
+        CORR["Correlation & Merge Engine\nFR-5: target + CWE + route + scope + parameter\nmethod/source checked when available\nFR-6: deduplicate each pair once"]
         LG["LangGraph Verification\nB-1: Code only → Confirmed\nstateful probe loop\ninternal Docker network"]
         UF --> AST
         AST --> CORR
@@ -96,19 +96,22 @@ graph TB
     end
 
     subgraph INTERNAL["Docker Network: internal (internal: true)"]
-        TARGET["mitigata-target\nwe45/Vulnerable-Flask-App\n:5050 — internal only\nPOST /login CWE-347\nPOST /register CWE-916\n404 handler CWE-94"]
+        TARGET["mitigata-flask-target\nwe45/Vulnerable-Flask-App\ninternal only"]
+        JUICE["mitigata-juice-shop\nOWASP Juice Shop · Express/Node.js\ninternal only"]
     end
 
     subgraph VOLUMES["Volumes"]
-        SRC["./target-app → /target-src :ro\nAST mapper reads exact running source"]
+        SRC["Selected profile source → /target-src :ro\nadapter reads source matching running target"]
         DATA["./data → /app/data\npre-seeded scan results"]
     end
 
     BROWSER --> FE
     CURL --> ENG
     BLOCKED -. "blocked" .-> TARGET
+    BLOCKED -. "blocked" .-> JUICE
     FE <--> ENG
-    ENG --> TARGET
+    ENG -->|"selected profile only"| TARGET
+    ENG -->|"selected profile only"| JUICE
     ENG --- SRC
     ENG --- DATA
 
@@ -129,29 +132,30 @@ graph TB
 ```mermaid
 sequenceDiagram
     participant DC as docker compose up
-    participant T as mitigata-target :5050
+    participant T as Selected target profile
     participant E as mitigata-engine :8000
     participant FE as mitigata-frontend :3000
     participant B as Browser
 
-    DC->>T: start container
+    DC->>T: start Flask and Juice Shop containers
     T-->>DC: healthcheck passes
     DC->>E: start container (depends_on target healthy)
     E->>E: load data/semgrep-results.json (FR-1)
     E->>E: load data/zap-alerts.json (FR-2)
-    E->>E: mount /target-src:ro (AST mapper)
+    E->>E: load selected target profile + matching source mount
     DC->>FE: start container
     FE-->>DC: ready :3000
 
     B->>FE: GET http://localhost:3000
-    FE->>E: GET /api/graph
+    FE->>E: GET /api/graph?target_id=flask_demo|juice_shop
     E->>E: semgrep_parser → UnifiedFinding[] (FR-3)
     E->>E: zap_parser → UnifiedFinding[] (FR-3)
-    E->>E: Pass 1: routes + Blueprint prefixes → normalized RouteNode[]
+    E->>E: select Flask or Express adapter by target profile
+    E->>E: Pass 1: routes + mounts/prefixes → normalized RouteNode[]
     E->>E: Pass 2: handlers + directly called helper scopes
     E->>E: Pass 3: request parameter reads (path/query/body/header)
     E->>E: map SAST locations into RouteNode code scopes
-    E->>E: correlate: CWE + route + scope + parameter (+ method)
+    E->>E: correlate: target + CWE + route + scope + parameter (+ method/source)
     E->>E: classifier → Confirmed/Code only/Runtime only (FR-7)
     E->>E: ELK layout → node positions
     E-->>FE: GraphResponse {nodes, edges, stats}
@@ -194,18 +198,18 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    START([Code only Finding]) --> PG[probe_generator\nvariant=0\npayload={{7*7}}]
-    PG --> RE[runtime_executor\nhttpx timeout=2.0s]
-    RE --> EV[response_evaluator\ncheck EVIDENCE_SIGNALS]
+    START(["Code only finding"]) --> PG["probe_generator<br/>variant = 0<br/>payload: {{7*7}}"]
+    PG --> RE["runtime_executor<br/>httpx timeout = 2.0s"]
+    RE --> EV["response_evaluator<br/>check EVIDENCE_SIGNALS"]
 
-    EV --> DEC{Evidence\nfound?}
-    DEC -->|Yes| CONFIRMED([🔴 Confirmed\nlabel updated\nSSE → UI])
-    DEC -->|No, variant==0| RETRY[retry_evaluator\nvariant += 1]
-    DEC -->|No, variant==1| CODEONLY([🟡 Code only\nprobe inconclusive])
+    EV --> DEC{"Evidence found?"}
+    DEC -->|Yes| CONFIRMED(["Confirmed<br/>label updated<br/>SSE to UI"])
+    DEC -->|No, variant = 0| RETRY["retry_evaluator<br/>variant = 1"]
+    DEC -->|No, variant = 1| CODEONLY(["Code only<br/>probe inconclusive"])
 
-    RETRY --> PG2[probe_generator\nvariant=1\npayload=$7*7}]
-    PG2 --> RE2[runtime_executor\nsecond attempt]
-    RE2 --> EV2[response_evaluator]
+    RETRY --> PG2["probe_generator<br/>variant = 1<br/>alternate canary"]
+    PG2 --> RE2["runtime_executor<br/>second attempt"]
+    RE2 --> EV2["response_evaluator<br/>check evidence"]
     EV2 -->|Evidence| CONFIRMED
     EV2 -->|No evidence| CODEONLY
 
@@ -275,16 +279,16 @@ flowchart LR
 
 ### 4.2 Three-Pass AST Route Mapper — FR-4
 
-FR-4 is a **must-have** requirement: *"read the source code to list which URL is handled by which function and lines"*. The mapper emits a unified `RouteNode`; route identity, source scope, and observed request keys are collected separately so a matching line range alone cannot establish correlation.
+FR-4 is a **must-have** requirement: *"read the source code to list which URL is handled by which function and lines"*. A profile selects either the Flask/Python adapter or Express/JavaScript adapter; both emit the same `RouteNode` contract. Route identity, source scope, and observed request keys are collected separately so a matching line range alone cannot establish correlation. Every route and finding carries `target_id`, preventing evidence from separate applications from joining.
 
 ```mermaid
 flowchart TD
     SRC["Read-only target source"]
 
     subgraph P1["Pass 1: Route and prefix mapping"]
-        PARSE["Parse Python modules"]
-        DECL["Extract Flask route decorators and methods"]
-        PREFIX["Resolve register_blueprint url_prefix"]
+        PARSE["Parse target modules\nPython ast or Node.js TypeScript Compiler API"]
+        DECL["Extract Flask decorators/Blueprints\nor Express routes/router.route()"]
+        PREFIX["Resolve Flask url_prefix\nor static Express app.use() mounts"]
         NORMAL["Join prefix and route; normalize dynamic segments"]
         R1["Route identity: normalized URL + method + handler"]
         PARSE --> DECL --> PREFIX --> NORMAL --> R1
@@ -303,7 +307,7 @@ flowchart TD
         READ --> PARAMS
     end
 
-    NODE["Unified RouteNode\nnormalized_url + methods + handler\nscopes[] + input_parameters[]"]
+    NODE["Unified RouteNode\ntarget_id + normalized_url + methods + handler\nscopes[] + input_parameters[]"]
     SAST["SAST finding\nfile + line + CWE"]
     SCOPE_MATCH{"SAST location inside\none of the route scopes?"}
     OUT["Route evidence for correlation\nexact source location + parameter reads"]
@@ -319,12 +323,14 @@ flowchart TD
     SCOPE_MATCH -->|No| UNMATCHED
 ```
 
-**Example RouteNode after all passes:** Blueprint mounted at `/api`, with
-`@bp.route("/orders/<int:id>")`, resolves to `/api/orders/{param}`. If the
-handler reads `request.args.get("q")` and calls an imported `db.py` helper, the
-node carries `ParameterRead("q", "query")` plus code scopes for the handler and
-direct helper. Pass 2 is intentionally one hop in v1; transitive call chains
-are not claimed as resolved.
+**Example RouteNode after all passes:** A Flask Blueprint mounted at `/api`,
+with `@bp.route("/orders/<int:id>")`, resolves to `/api/orders/{param}`. An
+Express router mounted with a static `app.use("/api", router)` prefix and a
+`router.get("/orders/:id", ...)` declaration resolves to the same template.
+Each adapter records its target ID, statically named request reads (such as
+`request.args.get("q")` or `req.query.q`), and handler/direct-helper code scopes.
+Pass 2 is intentionally one hop in v1; transitive call chains are not claimed
+as resolved. Dynamic or unresolved mount paths stay explicitly unresolved.
 
 ### 4.3 Correlation & Merge Engine — FR-5, FR-6
 
@@ -335,7 +341,7 @@ flowchart TD
     ROUTES["Three-pass RouteNode[]\nnormalized URL + methods\ncode scopes + observed parameter reads"]
 
     PATH["Parse DAST URL path"]
-    MATCH{"All required evidence matches?\nCWE + normalized route + method\nSAST file:line in scope + read parameter"}
+    MATCH{"All required evidence matches?\ntarget_id + CWE + normalized route\nmethod/source when available\nSAST file:line in scope + read parameter"}
     CONFIRMED["Confirmed\nmerge SAST + DAST evidence\nmerged_from = both source IDs"]
     CODE["Code only\nSAST unmatched by strict gate\npreserve AST reachability metadata"]
     RUNTIME["Runtime only\nDAST unmatched by strict gate"]
@@ -353,8 +359,10 @@ flowchart TD
     LEFT --> RUNTIME --> SORT
 ```
 
-The correlation gate is conjunctive: a CWE-only or route-only match is not
-enough to label a pair Confirmed. Unresolved route mounts, missing SAST
+The correlation gate is conjunctive: target ID, CWE, route, scope, and attacked
+parameter must match; method and parameter source must match when supplied. A
+CWE-only or route-only match is not enough to label a pair Confirmed. Findings
+and routes with different `target_id` values never correlate. Unresolved route mounts, missing SAST
 locations, dynamic request keys, or absent parameter evidence remain unmatched.
 Each DAST finding can be consumed by at most one SAST finding in a run.
 
@@ -366,7 +374,7 @@ stateDiagram-v2
 
     probe_generator : probe_generator\nselect payload by sink_type\nvariant 0=primary, 1=retry
 
-    runtime_executor : runtime_executor\nhttpx.request() → target:5050\ntimeout = 2.0s HARD LIMIT\ninternal Docker network only
+    runtime_executor : runtime_executor\nhttpx.request() → selected profile origin\ntimeout = 2.0s HARD LIMIT\ninternal Docker network only
 
     response_evaluator : response_evaluator\ncheck EVIDENCE_SIGNALS[sink_type]\nsql: OperationalError, sqlite3\nssti: 49, Jinja2\nxss: script, onerror\ncmd: CANARY_MITIGATA_2026
 
@@ -396,7 +404,7 @@ flowchart TD
     INPUT([Finding after\ncorrelation + LangGraph]) --> R1
 
     R1{LangGraph=Confirmed\nAND dual_confirmed?}
-    R1 -->|Yes| C1["🔴 Confirmed\nconfidence=0.98\nCWE + route + scope + parameter match"]
+    R1 -->|Yes| C1["🔴 Confirmed\nconfidence=0.98\ntarget + CWE + route + scope + parameter match"]
 
     R1 -->|No| R2
     R2{LangGraph=Confirmed?}
@@ -440,7 +448,7 @@ flowchart LR
 
     subgraph APPLY["Apply + Re-verify"]
         CHECK["git apply --check\ndry-run validation"]
-        APPLY2["git apply\nwrite to /target-src"]
+        APPLY2["git apply\nwrite only to selected target source"]
         REVERIFY["Re-run same LangGraph probe\nexact same payload"]
         RESULT["✅ Fix Verified\nor ❌ Re-patch Required"]
     end
@@ -519,7 +527,8 @@ graph LR
 ```mermaid
 graph TD
     subgraph APP["App.tsx — http://localhost:3000"]
-        SB["StatsBar\ntotal · confirmed · code_only\nruntime_only · suppression_ratio\ncwe_types_covered (Obj 01 proof)"]
+        TS["TargetSelector\nflask_demo | juice_shop"]
+        SB["StatsBar · active target_id\ntotal · confirmed · code_only\nruntime_only · suppression_ratio\ncwe_types_covered (Obj 01 proof)"]
 
         subgraph LEFT["60% Left Panel"]
             CG["CorrelationGraph.tsx\nReact Flow canvas\nELK auto-layout\nConfirmed nodes first\nanimated edges for Confirmed"]
@@ -544,6 +553,7 @@ graph TD
         end
     end
 
+    TS --> SB
     SB --> LEFT
     SB --> RIGHT
     CG --> DP
@@ -570,20 +580,23 @@ graph TB
     end
 
     subgraph INT["Docker Network: internal\ninternal: true"]
-        TGT["mitigata-target\n:5050\nNOT on public network"]
+        FLASK["Flask target\nwe45/Vulnerable-Flask-App\nNOT on public network"]
+        JUICE["Juice Shop target\nOWASP Juice Shop · Express\nNOT on public network"]
     end
 
     B --> FE
     C --> ENG
-    X -. "connection refused" .-> TGT
+    X -. "connection refused" .-> FLASK
+    X -. "connection refused" .-> JUICE
     FE <--> ENG
-    ENG -->|"LangGraph probes\nhttp://target:5050\ninternal network only"| TGT
+    ENG -->|"profile-selected probes\ninternal network only"| FLASK
+    ENG -->|"profile-selected probes\ninternal network only"| JUICE
 
     style INT fill:#2d1515,color:#fff
     style X fill:#dc2626,color:#fff
 ```
 
-**Probe route:** `engine (internal) → target (internal)` — never leaves Docker network.
+**Probe route:** `engine (internal) → selected target (internal)` — never leaves Docker network. Target profile selection determines both the target origin and the matching read-only source mount; the engine must not fall back to an arbitrary host or combine results across profiles.
 
 ---
 
@@ -595,6 +608,7 @@ graph TB
 classDiagram
     class UnifiedFinding {
         +str id  UUID auto-generated
+        +str target_id  flask_demo | juice_shop
         +str source  sast | dast
         +str cwe_id  MANDATORY CWE-89 etc
         +str label  Confirmed | Code only | Runtime only
@@ -602,7 +616,7 @@ classDiagram
         +int line  47
         +str function  login
         +str sink_type  sql_injection
-        +str url  http://target/login
+        +str url  selected target origin + path
         +str method  POST
         +str parameter  username
         +str evidence  Response contained 49
@@ -621,6 +635,7 @@ classDiagram
 ```mermaid
 classDiagram
     class RouteNode {
+        +str target_id
         +str normalized_url
         +str original_path
         +list methods
@@ -653,6 +668,8 @@ classDiagram
 classDiagram
     class AlertState {
         +str finding_id
+        +str target_id
+        +str target_origin  configured local profile origin
         +str route  /login
         +str method  POST
         +str parameter  username
@@ -682,6 +699,7 @@ classDiagram
 ```mermaid
 classDiagram
     class GraphResponse {
+        +str target_id  selected profile
         +list nodes
         +list edges
         +GraphStats stats
@@ -696,6 +714,7 @@ classDiagram
 
     class NodeData {
         +str label
+        +str target_id
         +str finding_label  Confirmed | Code only | Runtime only
         +float confidence
         +str file
@@ -733,14 +752,14 @@ classDiagram
 ```mermaid
 graph LR
     subgraph ENDPOINTS["FastAPI Endpoints"]
-        E1["GET /api/graph\n≤10s · cached 10s TTL"]
-        E2["POST /api/verify/{id}\nSSE stream · ≤2s/probe"]
+        E1["GET /api/graph?target_id=...\nprofile-scoped · ≤10s · cached 10s TTL"]
+        E2["POST /api/verify/{id}\nfinding target_id selects profile\nSSE stream · ≤2s/probe"]
         E3["GET /api/verify/{id}/stream\nEventSource endpoint"]
-        E4["POST /api/patch/{id}\n≤15s · GPT-4o/template"]
-        E5["POST /api/patch/{id}/apply\ngit apply + re-verify"]
+        E4["POST /api/patch/{id}\nselected-target source · ≤15s"]
+        E5["POST /api/patch/{id}/apply\nprofile-scoped git apply + re-verify"]
         E6["GET /api/compliance/{id}\n<200ms · dict lookup"]
-        E7["GET /api/findings\nsorted Confirmed first"]
-        E8["GET /api/findings/{id}\nFR-8 full detail"]
+        E7["GET /api/findings?target_id=...\nprofile-scoped · Confirmed first"]
+        E8["GET /api/findings/{id}\nFR-8 detail includes target_id"]
         E9["GET /api/export/sarif\nB-6 SARIF export"]
         E10["GET /health\nDocker healthcheck"]
         E11["GET /docs\nSwagger UI"]
@@ -763,7 +782,7 @@ How our architecture maps to the 36 planted vulnerabilities judges score against
 
 ```mermaid
 graph TD
-    subgraph AK["Answer Key (36 planted)"]
+    subgraph AK["Flask fixture answer key (36 planted)"]
         P20["20 Code+Runtime Pairs\nConfirmed candidates"]
         P10["10 Code only\ne.g. hardcoded secrets"]
         P6["6 Runtime only\ne.g. missing headers"]
@@ -771,14 +790,14 @@ graph TD
     end
 
     subgraph HOW["How We Hit Each"]
-        H20["CWE + normalized route + method\n+ code scope + attacked parameter\n→ Confirmed label\nLangGraph B-1 verifies Code only"]
+        H20["target_id + CWE + normalized route\n+ method/source when known\n+ code scope + attacked parameter\n→ Confirmed label"]
         H10["SAST only, no DAST match\n→ Code only label\nFR-7 classification"]
         H6["DAST only, no SAST match\n→ Runtime only label\nFR-7 classification"]
         H8["AST reachability check\nparameterised query detection\nB-2 noise cut\nNOT reported"]
     end
 
     subgraph TARGETS["Performance Targets"]
-        T1["Correct links > 50% Good\n> 80% Great\n20 pairs · need 10-16 linked"]
+        T1["Correct links > 50% Good\n> 80% Great\nreport metrics per target profile"]
         T2["Wrong links < 20% Good\n< 5% Great\nAST gates false merges"]
         T3["False alarms < 30% Good\n< 10% Great\nB-2 suppresses safe decoys"]
         T4["Code detection > 60% Good\n> 85% Great\nSemgrep multi-config"]
@@ -856,12 +875,12 @@ graph TD
             SCHEMA["schema.py\nUnifiedFinding\nPydantic v2"]
             SP["semgrep_parser.py"]
             ZP["zap_parser.py"]
-            CORR["correlator.py\nFR-5 FR-6"]
+            CORR["correlator.py\ntarget + CWE + route + scope + parameter\nFR-5 FR-6"]
         end
 
-        subgraph AST["ast_mapper/"]
+        subgraph AST["ast_mapper/ + adapters/"]
             RS["route_schema.py\nRouteNode · CodeScope · ParameterRead"]
-            RE["route_extractor.py\nFR-4\nstdlib: ast, os"]
+            RE["Flask + Express adapters\nFR-4\nPython ast + Node.js AST"]
             SD["sink_detector.py\nstdlib: ast"]
             CG["call_graph.py\none-hop helper scopes\nrequest parameter reads"]
             MG["merger.py\nAST enrichment"]
@@ -938,13 +957,13 @@ graph TD
 graph LR
     subgraph OBJ["Objectives → Components"]
         O1["Objective 01\nFR-1 FR-2 FR-3"] --> C1["semgrep_parser\nzap_parser\nschema UnifiedFinding"]
-        O2["Objective 02\nFR-4 FR-5 FR-6"] --> C2["three-pass route mapper FR-4\ncorrelator: CWE + route + scope + parameter\nFR-5 FR-6 dedup"]
+        O2["Objective 02\nFR-4 FR-5 FR-6"] --> C2["three-pass Flask/Express route adapters FR-4\ncorrelator: target + CWE + route + scope + parameter\nmethod/source when available · FR-5 FR-6 dedup"]
         O3["Objective 03\nFR-7 FR-8 FR-9"] --> C3["classifier\nlanggraph_loop B-1\nFindingDetailPanel FR-8\ncorrelator sort FR-9"]
     end
 ```
 
 ---
 
-*Architecture version: 1.2 — Mitigata Hackathon Problem 06 (Flagship)*
+*Architecture version: 1.3 — Mitigata Hackathon Problem 06 (Flagship); Flask + Express multi-target architecture*
 *All diagrams use Mermaid — renders natively in GitHub, GitLab, VS Code with Markdown Preview Enhanced, and Obsidian*  
 *Reference: [P06-PRD.md](P06-PRD.md) · [P06-SAST-DAST-Correlation-Engine.md](P06-SAST-DAST-Correlation-Engine.md) · [P06-Build-Plan.md](P06-Build-Plan.md)*

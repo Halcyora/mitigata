@@ -87,7 +87,7 @@ These three objectives are **what judges score**. All three must be demonstrated
 
 > **Important:** The official PRD vulnerability list is CWE-89, CWE-79, CWE-78, CWE-22, CWE-601, CWE-798. Earlier drafts listed CWE-502 (Pickle) and CWE-347 (JWT) — those are still detectable and score bonus points, but are not in the official 6-type list judges use for scoring.
 
-**Common format requirement:** All findings from both tools normalised into a single `UnifiedFinding` schema with mandatory `cwe_id` field.
+**Common format requirement:** All findings from both tools and both target profiles are normalised into a single `UnifiedFinding` schema with mandatory `target_id` and `cwe_id` fields.
 
 ---
 
@@ -97,30 +97,33 @@ These three objectives are **what judges score**. All three must be demonstrated
 
 The correlation engine must:
 
-1. **Link** a DAST runtime finding to a SAST location only when deterministic AST evidence agrees on normalized route, route code scope, and the attacked input parameter
+1. **Link** a DAST runtime finding to a SAST location only when target identity and deterministic AST evidence agree on normalized route, route code scope, and the attacked input parameter
 2. **Merge** duplicate findings (same vulnerability reported by both SAST and DAST) into a single record
 3. **Deduplicate** — each real vulnerability appears **exactly once** in the output
-4. **Require** CWE agreement as well as route, scope, parameter, and HTTP method agreement when the method is known
+4. **Require** target and CWE agreement as well as route, scope, and attacked-parameter agreement; HTTP method and parameter source must agree when known
 5. **Prove** the linkage deterministically, not via LLM guessing; a CWE-only or line-range-only match is not sufficient
 
-**Example:** a Flask Blueprint mounted at `/api` declares
+**Example:** for `target_id=flask_demo`, a Flask Blueprint mounted at `/api` declares
 `@bp.route("/orders/<int:id>")`. The route normalizes to
 `/api/orders/{param}`. If the handler reads query key `q` and directly calls an
 imported helper in `db.py`, the route node contains that parameter read and both
 handler/helper source scopes. A ZAP finding for `/api/orders/42?q=test` can
-correlate with a SAST finding at the helper only if the CWE and method also
-match. An attack on another parameter, another route, or a SAST line outside
+correlate with a SAST finding at the helper only if target ID, CWE, route, and
+known method/source also match. The Express adapter resolves a statically mounted
+`router.get("/orders/:id", ...)` under `app.use("/api", router)` to the same URL
+template and extracts reads such as `req.query.q`. An attack on another
+parameter, another route, a different target profile, or a SAST line outside
 those scopes stays unlinked.
 
 ```mermaid
 flowchart LR
     ZAP["ZAP alert\nGET /api/orders/42?q=test\nCWE-89 · parameter q"]
     NORMAL["Normalize runtime path\n/api/orders/{param}"]
-    ROUTE["RouteNode\nFlask prefix + route\n/api/orders/{param}"]
+    ROUTE["RouteNode\ntarget_id + Flask/Express mount + route\n/api/orders/{param}"]
     SCOPE["Pass 2 scope\norders.py handler\n+ direct db.py helper"]
     PARAM["Pass 3 input reads\nid: path\nq: query"]
     SAST["Semgrep finding\nCWE-89 · db.py:55"]
-    CHECK{"CWE + path + method\n+ SAST location in scope\n+ attacked parameter read?"}
+    CHECK{"target_id + CWE + path\n+ method/source when available\n+ SAST location in scope\n+ attacked parameter read?"}
     CONFIRMED["Confirmed\none finding with code + runtime evidence"]
     NO_MATCH["No merge\nfindings retain Code only / Runtime only labels"]
 
@@ -133,12 +136,14 @@ flowchart LR
     CHECK -->|Any check fails| NO_MATCH
 ```
 
-**Correlation gate:** CWE, normalized path, method (when available), source
-scope, and attacked parameter are conjunctive evidence. `CodeScope` matches an
-exact file and inclusive start/end line span; it is not a heuristic substring
-match. `ParameterRead` preserves both the input name and source kind (`path`,
-`query`, `form`, `json`, or `header`). Dynamic/unknown parameter names do not
-act as wildcards.
+**Correlation gate:** `target_id`, CWE, normalized path, source scope, and
+attacked parameter are conjunctive evidence. HTTP method and parameter source
+must also match when supplied. `CodeScope` matches an exact target-relative
+file and inclusive start/end line span; it is not a heuristic substring match.
+`ParameterRead` preserves both the input name and source kind (`path`, `query`,
+`form`, `json`, or `header`). Dynamic/unknown parameter names do not act as
+wildcards. Findings and routes with different target IDs never correlate; each
+scan must use the source revision paired with its selected profile.
 
 **Merge logic:**
 
@@ -147,8 +152,8 @@ flowchart TD
     SAST["SAST findings"]
     DAST["DAST findings"]
     ROUTES["Three-pass RouteNode index"]
-    CANDIDATE{"For each SAST/DAST candidate:\nCWE matches?"}
-    GATE{"Normalized route + method\n+ scope + parameter match?"}
+    CANDIDATE{"For each SAST/DAST candidate:\ntarget_id and CWE match?"}
+    GATE{"Normalized route + method/source when known\n+ scope + attacked parameter match?"}
     MERGE["Merge pair\nConfirmed\nmerged_from contains both IDs"]
     SAST_ONLY["Emit SAST as Code only"]
     LEFT["Filter DAST IDs not consumed by a merge"]
@@ -215,6 +220,7 @@ All components below are **required**. Omitting any one risks disqualification f
 | OWASP ZAP (DAST) | Alerts JSON / HTTP trace logs | `url`, `method`, `parameter`, `evidence`, `cweid` |
 
 **Output:** A normalised `UnifiedFinding` object with:
+- Mandatory `target_id` field (e.g., `"flask_demo"` or `"juice_shop"`) — isolates findings from different applications and revisions
 - Mandatory `cwe_id` field (e.g., `"CWE-89"`) — the shared correlation key
 - `source` field: `"sast"` or `"dast"`
 - `label` field: `"Confirmed"`, `"Code only"`, or `"Runtime only"`
@@ -225,30 +231,32 @@ All components below are **required**. Omitting any one risks disqualification f
 
 ### 5.2 Three-Pass Deterministic AST Route Mapper
 
-**What it does:** Uses Python `ast` to create a unified route node and deterministic route evidence in three passes. The v1 implementation targets Flask/Python. Keep framework-specific route extraction behind adapters; Express `app.use()` mounting and JavaScript `:id` route parsing are future work, not a current capability.
+**What it does:** Uses a profile-selected, language-specific AST adapter to emit a shared route-node schema and deterministic route evidence in three passes. Flask/Python is the reference adapter; Express/Node.js is the second adapter for the OWASP Juice Shop target. The Python engine consumes both adapters through the same `RouteNode`, `CodeScope`, and `ParameterRead` contract.
 
 **Three passes:**
 
 | Pass | Responsibility | Route node output |
 |---|---|---|
-| 1 — Route and prefix mapping | Extract Flask route decorators/methods, resolve statically known `register_blueprint(..., url_prefix=...)` mounts, join prefix and route, normalize dynamic path segments | Original path, normalized URL, methods, handler |
+| 1 — Route and prefix mapping | Flask decorators/Blueprint `url_prefix` or Express route declarations/`router.route()` and static `app.use()` mounts; normalize dynamic path segments | `target_id`, original path, normalized URL, methods, handler |
 | 2 — One-hop callee scopes | Resolve directly called local or imported project helpers from the handler; record exact function spans | Handler and direct-callee `CodeScope[]` |
-| 3 — Request parameter extraction | Inspect handler and one-hop helper ASTs for statically named request reads | `ParameterRead[]` with name and source kind |
+| 3 — Request parameter extraction | Inspect handler and one-hop helper ASTs for statically named framework-specific request reads | `ParameterRead[]` with name and source kind |
 
 **Requirements:**
 
-- Parse Flask route decorators and statically resolvable Blueprint registrations.
-- Normalize typed dynamic segments (for example `<int:id>`) to a shared `{param}` URL template while preserving parameter name/source metadata.
+- Parse Flask route decorators and statically resolvable Blueprint registrations; for Express, parse `app.get/post/...`, `router.get/post/...`, `router.route()`, and static `app.use(prefix, router)` mounts.
+- Normalize Flask typed dynamic segments (for example `<int:id>`) and Express `:id` segments to a shared `{param}` URL template while preserving parameter name/source metadata.
 - Resolve only direct helper calls in v1; do not imply transitive reachability for a helper's callees.
 - Identify configured sink patterns and map sink locations to exact route code scopes.
-- Recognize statically named Flask request reads such as `request.args["q"]`, `request.args.get("q")`, `request.form`, JSON body keys, headers, and path arguments.
-- Output serializable `RouteNode`, `CodeScope`, and `ParameterRead` records for correlation.
-- Keep unresolved dynamic mounts/imports/request keys explicit and ineligible for broad matching.
+- Recognize statically named Flask reads (`request.args`, `request.form`, JSON, headers, and path arguments) and Express reads (`req.params`, `req.query`, `req.body`, and headers).
+- Output serializable `RouteNode`, `CodeScope`, and `ParameterRead` records, all carrying or belonging to a `target_id`-scoped route index.
+- Keep unresolved dynamic mounts/imports/request keys explicit and ineligible for broad matching; do not turn unresolved evidence into a wildcard.
 
 **Expected example:** `/api/orders/42?q=test` normalizes to
 `/api/orders/{param}`; a route reading `q` and calling a direct helper includes
 that helper's source span, allowing a `db.py:55` finding to be considered by
-the correlation gate.
+the correlation gate for the same target. The Express equivalent is
+`app.use("/api", router)` plus `router.get("/orders/:id", ...)`, with
+`req.query.q` recorded as a query parameter read.
 
 > ⚠️ **Critical Constraint:** The route-to-sink mapping must be **deterministic** — no LLM guessing. Mathematical linkage must be established *before* any AI layer is invoked. This is the core of Objective 02.
 
@@ -262,18 +270,21 @@ the correlation gate.
 
 ```mermaid
 flowchart TD
-    S["SAST finding\nCWE + file + line"]
-    D["DAST finding\nCWE + URL + method + parameter"]
-    R["RouteNode index\nnormalized URL + methods\ncode scopes + observed input parameters"]
+    S["SAST finding\ntarget_id + CWE + file + line"]
+    D["DAST finding\ntarget_id + CWE + URL + method + parameter"]
+    R["RouteNode index\ntarget_id + normalized URL + methods\ncode scopes + observed input parameters"]
+    TARGET{"Same target_id?"}
     CWE{"CWE IDs equal?"}
-    ROUTE{"Normalized DAST path matches route?\nMethod matches when known?"}
+    ROUTE{"Normalized DAST path matches route?\nMethod/source match when known?"}
     SCOPE{"SAST file:line is within\nhandler or one-hop helper scope?"}
     PARAM{"Attacked DAST parameter is\nread by this route?"}
     YES["All checks pass\nMerge once as Confirmed"]
     NO["Any check fails\nDo not link this pair"]
 
-    S --> CWE
-    D --> CWE
+    S --> TARGET
+    D --> TARGET
+    TARGET -->|Yes| CWE
+    TARGET -->|No| NO
     R --> ROUTE
     CWE -->|Yes| ROUTE
     CWE -->|No| NO
@@ -287,15 +298,21 @@ flowchart TD
     PARAM -->|No| NO
 ```
 
-Correlation uses the exact DAST URL path, route template, known HTTP method,
-SAST location, attacked parameter name, and CWE. A CWE match alone is never
-sufficient. A DAST finding can be consumed by at most one merged pair. When no
-pair passes the gate, preserve SAST as Code only and unconsumed DAST as Runtime
-only; the AST reachability result remains separate metadata and does not
-manufacture a DAST match.
+Correlation requires the same `target_id`, CWE, exact DAST URL path/route
+template, SAST location in a route scope, and attacked parameter name. HTTP
+method and parameter source must match when supplied. File paths are normalized
+to target-relative paths before scope checks. A CWE match alone is never
+sufficient, and findings from different target IDs never correlate. Each scan
+must use the source revision paired with its selected profile; do not combine
+results collected against different revisions.
+A DAST finding can be consumed by at most one merged pair. When no pair passes
+the gate, preserve SAST as Code only and unconsumed DAST as Runtime only; the
+AST reachability result remains separate metadata and does not manufacture a
+DAST match.
 
 **Output per merged finding:**
 - `label`: `"Confirmed"` | `"Code only"` | `"Runtime only"`
+- `target_id`: selected target profile (`"flask_demo"` or `"juice_shop"`)
 - `code_location`: `{file, line, function, sink_type}`
 - `runtime_proof`: `{url, method, parameter, http_status, response_evidence}`
 - `cwe_id`: shared CWE number
@@ -571,7 +588,7 @@ flowchart TD
     SAST["SAST findings"]
     DAST["DAST findings"]
     ROUTES["Three-pass AST route index"]
-    GATE{"CWE + normalized route + known method\n+ SAST code scope + attacked parameter"}
+    GATE{"target_id + CWE + normalized route\n+ method/source when known\n+ SAST code scope + attacked parameter"}
     CONFIRMED["Confirmed\nRank 1\nAll evidence linked"]
     CODE["Code only\nRank 2\nSAST unmatched; retain AST reachability"]
     REMAINING["Unconsumed DAST IDs"]
@@ -671,8 +688,9 @@ Must start all of the following services:
 
 | Container | Purpose | Network |
 |---|---|---|
-| `target` | Vulnerable Flask/FastAPI app being scanned | `internal` only |
-| `engine` | FastAPI correlation engine (ingestion + AST + LangGraph + classifier) | `internal` + `public` |
+| `flask-target` | we45 Flask reference target (`flask_demo` profile) | `internal` only |
+| `juice-shop` | OWASP Juice Shop Express/Node.js target (`juice_shop` profile) | `internal` only |
+| `engine` | FastAPI correlation engine; selects a target profile for scans, route extraction, correlation, and probes | `internal` + `public` |
 | `frontend` | React UI (Correlation Workbench) | `public` only |
 
 ### 11.2 Network Isolation Requirements
@@ -684,7 +702,8 @@ networks:
   public:             # engine API + frontend accessible from host
 ```
 
-- The **target app container must not be directly accessible from the host machine**
+- Neither target app container may be directly accessible from the host machine
+- Both targets are isolated on the internal network; the engine contacts only the configured target for the selected profile
 - All LangGraph probes must route through the `internal` Docker network
 - This enforces the "no external traffic from probes" constraint
 
@@ -692,11 +711,12 @@ networks:
 
 ```yaml
 volumes:
-  - ./target-app:/target-src:ro   # read-only mount — AST mapper reads exact running source
+  - ./targets/vulnerable_flask:/target-src/flask_demo:ro
+  - ./targets/juice-shop:/target-src/juice_shop:ro
   - ./data:/app/data               # pre-seeded scan results
 ```
 
-The AST mapper must run against the **exact same source files** that are running in the target container — enforced via read-only volume mount.
+The selected adapter must read the **exact same source revision** that is running in its target container. Profile-specific read-only mounts, scan fixtures, and ground-truth manifests must stay paired; source paths are normalized to target-relative paths before correlation.
 
 ### 11.4 Health Check Requirements
 
@@ -710,7 +730,7 @@ healthcheck:
   retries: 3
 ```
 
-Engine must wait for target health check before starting LangGraph probes (`depends_on: condition: service_healthy`).
+Engine must wait for the selected target's health check before running its scans or LangGraph probes (`depends_on: condition: service_healthy`). Both services may start at compose-up, but unselected profile data must not be mixed into the active scan.
 
 ### 11.5 One-Command Startup Verification
 
@@ -734,12 +754,15 @@ docker compose up --build
 ```
 Step 1 [0:00–0:30]  Open Correlation Workbench directly (no login screen)
                     Show: "docker compose up --build" result — all containers healthy
-                    Show: Unified ingestion — Semgrep + ZAP findings in one format with CWE numbers
-                    Show: Stats bar — total findings · confirmed · code only · runtime only
+                    Show: Select `flask_demo` or `juice_shop`; display the active target_id
+                    Show: Unified Semgrep + ZAP ingestion with target_id and CWE numbers
+                    Show: Target-scoped stats — total · confirmed · code only · runtime only
 
 Step 2 [0:30–1:30]  Navigate the Correlation Graph (Objective 02)
                     Show: HTTP endpoint → controller → sink → HTTP proof (split-screen)
                     Show: "Each vulnerability appears once" — merged finding with code + runtime proof
+                    Show: Express route/prefix and request parameter mapping on Juice Shop
+                    Show: Switching target changes graph and stats; no cross-target links
                     Show: Code-only alerts suppressed (70%+ noise reduction visible)
                     Say: "Deterministic AST linkage — exact file and line, not LLM guessing"
 
@@ -765,10 +788,11 @@ Step 5 [3:30–5:00]  Business Risk Dashboard
 
 The target application used in the demo must be:
 - **Containerised via Docker** (runnable with `docker compose up`)
-- A simple Python/Node.js web API (Flask, FastAPI, or Express)
+- One explicitly selected profile: Flask baseline or OWASP Juice Shop via the Express/Node.js adapter
 - Pre-seeded with a mix of reachable and unreachable vulnerabilities (see §7.2)
 - Scannable by Semgrep and ZAP without additional configuration
-- Pre-seeded `data/semgrep-results.json` and `data/zap-alerts.json` committed so demo works offline
+- Pre-seeded Semgrep/ZAP fixtures and ground truth are profile-specific and keyed by `target_id`, so the demo works offline without mixing results
+- Pin Juice Shop to a source revision; report its verified ground-truth metrics separately from the controlled Flask fixture
 
 ---
 
@@ -780,12 +804,16 @@ A submission is considered complete when **all** of the following are true:
 - [ ] Semgrep SARIF/JSON ingested and normalised with CWE numbers
 - [ ] OWASP ZAP alerts JSON ingested and normalised with CWE numbers
 - [ ] At least 4 of 6 vulnerability types covered (CWE-89 and CWE-79 mandatory)
-- [ ] All findings in one common `UnifiedFinding` schema with `cwe_id` field
+- [ ] Flask and Express/Node.js adapters emit the same `RouteNode`, `CodeScope`, and `ParameterRead` schema
+- [ ] All findings in one common `UnifiedFinding` schema with `target_id` and `cwe_id` fields
+- [ ] Flask and Juice Shop use separate profiles, source revisions, fixtures, and ground-truth reports
 
 ### Objective 02 — Correlate and Merge
 - [ ] AST call graph built deterministically from source code
 - [ ] Every HTTP route mapped to its downstream sinks
-- [ ] SAST and DAST findings joined only when CWE + normalized route + method (when known) + code scope + attacked parameter match
+- [ ] Express static `app.use()` prefixes, route declarations, and supported request parameter sources are covered by adapter tests
+- [ ] SAST and DAST findings joined only when target_id + CWE + normalized route + code scope + attacked parameter match; method/source must match when known
+- [ ] A regression test proves same-route/CWE findings from different target IDs never correlate
 - [ ] Each real vulnerability appears exactly once in output
 - [ ] Each finding has `code_location` (file + line) AND/OR `runtime_proof` (URL + evidence)
 - [ ] LangGraph verification loop fires targeted probes and updates finding label
