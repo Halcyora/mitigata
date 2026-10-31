@@ -2,6 +2,7 @@
 from pathlib import Path
 from app.parsers.base_parser import get_parser
 from app.normalizer.route_normalizer import match_dast_to_route
+from app.schemas.route import NormalizedRoute
 
 
 def test_flask_three_pass_parser(tmp_path: Path):
@@ -54,3 +55,20 @@ def test_flask_three_pass_parser(tmp_path: Path):
     matched = match_dast_to_route("http://localhost:5000/api/orders/42?q=test", "GET", routes)
     assert matched is not None
     assert matched.handler_function == "get_order"
+
+    mixed_slug_routes = [
+        NormalizedRoute(
+            raw_url="/users/<int:user_id>",
+            normalized_url="/users/{param}",
+            method="GET",
+            handler_function="show_user",
+            file="app.py",
+            start_line=1,
+            end_line=3,
+            parameters=[],
+            callees=[],
+        )
+    ]
+    slug_match = match_dast_to_route("http://localhost:5000/users/guest42?tab=profile", "GET", mixed_slug_routes)
+    assert slug_match is not None
+    assert slug_match.handler_function == "show_user"

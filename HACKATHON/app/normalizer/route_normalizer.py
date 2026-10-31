@@ -15,10 +15,32 @@ FLASK_PATH_VAR_NAME_PATTERN = re.compile(r"<(?:[a-zA-Z0-9_]+:)?([a-zA-Z0-9_]+)>"
 # Matches Express path variable names: :orderId -> orderId
 EXPRESS_PATH_VAR_NAME_PATTERN = re.compile(r":([a-zA-Z0-9_]+)")
 
-# Matches runtime DAST dynamic path segments (integers, hex strings, UUIDs)
+# Matches runtime DAST dynamic path segments that are usually identifiers or scoped values.
+# Examples: 42, 4d9f..., UUIDs, or mixed alphanumeric slugs (abc123, order-42, user_7).
 RUNTIME_DYNAMIC_SEGMENT_PATTERN = re.compile(
-    r"^(\d+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{24})$"
+    r"^(?:"
+    r"\d+|"
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|"
+    r"[0-9a-fA-F]{24}|"
+    r"[A-Za-z0-9_-]*[A-Za-z0-9_-][A-Za-z0-9_-]*[0-9][A-Za-z0-9_-]*|"
+    r"[A-Za-z0-9_-]*[0-9][A-Za-z0-9_-]*"
+    r")$"
 )
+
+
+def _looks_like_dynamic_segment(segment: str) -> bool:
+    """Heuristic: treat IDs / mixed slugs as dynamic while leaving static nouns alone."""
+    if not segment or segment in {".", ".."}:
+        return False
+    if segment.isdigit():
+        return True
+    if len(segment) >= 8 and any(ch.isdigit() for ch in segment):
+        return True
+    if len(segment) >= 36:
+        return False
+    if "-" in segment or "_" in segment:
+        return True
+    return bool(re.fullmatch(r"[A-Za-z0-9]+", segment) and len(segment) >= 6 and any(ch.isdigit() for ch in segment))
 
 
 def join_url_paths(*parts: str) -> str:
@@ -43,10 +65,13 @@ def normalize_dast_url(full_url: str) -> str:
     segments = [seg for seg in path.split("/") if seg]
     if not segments:
         return "/"
-    normalized_segments = [
-        "{param}" if RUNTIME_DYNAMIC_SEGMENT_PATTERN.match(seg) else seg
-        for seg in segments
-    ]
+
+    normalized_segments = []
+    for seg in segments:
+        if RUNTIME_DYNAMIC_SEGMENT_PATTERN.match(seg) or _looks_like_dynamic_segment(seg):
+            normalized_segments.append("{param}")
+        else:
+            normalized_segments.append(seg)
     return "/" + "/".join(normalized_segments)
 
 

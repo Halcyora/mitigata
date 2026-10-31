@@ -1,4 +1,39 @@
-## structure
+# SAST-DAST Correlator
+
+## Current phase: target applications and Docker
+
+The current codebase contains Python and JavaScript route parsers. Phase 1 adds
+pinned upstream targets, per-target profiles, and a Docker Compose network that
+keeps intentionally vulnerable apps isolated from host access.
+
+From this directory, in PowerShell:
+
+```powershell
+.\scripts\fetch_targets.ps1
+.\scripts\fetch_flask_wheels.ps1
+docker compose up --build
+```
+
+Compose builds and starts the Flask reference app and OWASP Juice Shop. Neither
+target publishes a port to the host. Later scanner/API services will join their
+internal Docker network. Do not expose these target containers to untrusted
+networks.
+
+The Flask wheelhouse is downloaded on the host using its trusted certificate
+store, then installed offline in the container. This avoids weakening TLS
+verification in the legacy target's container build.
+
+See [targets/README.md](targets/README.md) for upstream revisions and isolation
+details. The profiles are [configs/flask_demo.yaml](configs/flask_demo.yaml)
+and [configs/juice_shop.yaml](configs/juice_shop.yaml).
+
+The Flask upstream is an old Python 2 application. Its source remains unchanged
+and is run through a separate Python 3 compatibility overlay in
+`targets/vulnerable_flask`; this is only an isolated test target, not a
+production service. Target source checkouts are ignored by Git and pinned by
+`scripts/fetch_targets.ps1`.
+
+## Planned project structure
 
 ```
 sast-dast-correlator/
@@ -80,5 +115,4 @@ sast-dast-correlator/
     └── demo_script.md             # 4 to 5 minute demo flow
 ```
 
-## Tech Stack
-
+## Planned Tech Stack

@@ -1,0 +1,9 @@
+targets/vulnerable_flask/source/
+targets/juice-shop/source/
+targets/vulnerable_flask/wheelhouse/
+__pycache__/
+.pytest_cache/
+.venv/
+.env
+data/raw/
+data/scans.db

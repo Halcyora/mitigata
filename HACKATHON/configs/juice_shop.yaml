@@ -1,0 +1,14 @@
+target_id: juice_shop
+target_revision: f189f521266f42c6bd05884468292000cee852ed
+language: javascript
+framework: express
+adapter: express
+docker_service: target-juice-shop
+source_dir: /targets/juice-shop/source
+target_url: http://target-juice-shop:3000
+semgrep_configs:
+  - p/javascript
+  - p/security-audit
+exclude:
+  - .git
+  - node_modules

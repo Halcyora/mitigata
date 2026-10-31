@@ -403,7 +403,7 @@ Profile contracts (`configs/flask_demo.yaml` and
 target_id: flask_demo
 language: python
 framework: flask
-source_dir: /targets/vulnerable_flask
+source_dir: /targets/vulnerable_flask/source
 target_url: http://target-flask:5050
 semgrep_configs:
   - p/python
@@ -418,7 +418,7 @@ adapter: flask
 target_id: juice_shop
 language: javascript
 framework: express
-source_dir: /targets/juice-shop
+source_dir: /targets/juice-shop/source
 target_url: http://target-juice-shop:3000
 semgrep_configs:
   - p/javascript

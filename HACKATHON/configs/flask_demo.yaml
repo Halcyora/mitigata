@@ -1,0 +1,17 @@
+target_id: flask_demo
+target_revision: b6a4f97afd466e83e1f60781494252dec1c37039
+runtime_overlay: /targets/vulnerable_flask
+language: python
+framework: flask
+adapter: python
+docker_service: target-flask
+source_dir: /targets/vulnerable_flask/source
+target_url: http://target-flask:5050
+semgrep_configs:
+  - p/python
+  - p/flask
+  - p/security-audit
+exclude:
+  - .git
+  - .venv
+  - app/test.db
