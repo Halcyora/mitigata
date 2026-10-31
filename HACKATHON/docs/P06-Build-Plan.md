@@ -60,7 +60,7 @@ against its own pinned-revision ground truth and report those results separately
 | **B-1** | Auto-verify Code only → Confirmed | LangGraph verification loop (Phase 4) |
 | **B-2** | Cut SAST noise (parameterised queries, dead code) | AST reachability + sink safety check (Phase 3) |
 | **B-3** | Explain every link (why joined) | `merged_from[]` + `reason` field in UI |
-| **B-4** | Plain-English fix suggestion | GPT-4o patch + template (Phase 6) |
+| **B-4** | Plain-English fix suggestion | Sarvam GLM-5.3 patch + template (Phase 6) |
 | B-5 | Compare two scans | Out of scope for v1 |
 | **B-6** | Export SARIF + CI fail on confirmed HIGH | SARIF export endpoint `/api/export/sarif` |
 | **B-7** | **Second language** | **Express/Node.js adapter + OWASP Juice Shop target profile** |
@@ -272,7 +272,7 @@ mitigata-p06/
 │   │   └── classifier.py          ← Confirmed/Code only/Runtime only + ranking (Obj 03)
 │   ├── patch_engine/
 │   │   ├── templates.py           ← Deterministic patches (zero cost, demo-safe)
-│   │   ├── llm_patcher.py         ← Azure OpenAI GPT-4o (with fallback chain)
+│   │   ├── llm_patcher.py         ← Sarvam Token Factory GLM-5.3
 │   │   └── patcher.py             ← LLM → template fallback orchestrator
 │   └── compliance/
 │       ├── risk_calculator.py     ← INR exposure (IBM 2024 India benchmark)
@@ -386,14 +386,13 @@ networks:
 TARGET_PROFILE=flask_demo
 TARGETS_ROOT=/targets
 
-# Azure OpenAI — GPT-4o primary, GPT-4o-mini fallback
-AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
-AZURE_OPENAI_KEY=your-key-here
-AZURE_OPENAI_DEPLOYMENT=gpt-4o
-AZURE_OPENAI_FALLBACK_DEPLOYMENT=gpt-4o-mini
+# Sarvam Token Factory — OpenAI-compatible API
+SARVAM_API_KEY=your-sarvam-api-key
+SARVAM_BASE_URL=https://api.sarvam.ai/v2
+SARVAM_MODEL=glm5.3
 
 # Leave blank to use template patches only (zero cost, demo-safe)
-# AZURE_OPENAI_KEY=
+# SARVAM_API_KEY=
 ```
 
 Profile contracts (`configs/flask_demo.yaml` and
@@ -1327,17 +1326,16 @@ def classify(
 
 **Scoring impact:** Part of the 20-pt criterion. The re-verify step is what judges want to see.
 
-### 6.1 LLM patcher — Azure OpenAI GPT-4o (primary)
+### 6.1 LLM patcher — Sarvam GLM-5.3
 
 ```python
 # engine/patch_engine/llm_patcher.py
 import os
 from typing import Optional
 
-_PRIMARY   = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
-_FALLBACK  = os.environ.get("AZURE_OPENAI_FALLBACK_DEPLOYMENT", "gpt-4o-mini")
-_ENDPOINT  = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
-_KEY       = os.environ.get("AZURE_OPENAI_KEY", "")
+_BASE_URL = os.environ.get("SARVAM_BASE_URL", "https://api.sarvam.ai/v2")
+_MODEL = os.environ.get("SARVAM_MODEL", "glm5.3")
+_KEY = os.environ.get("SARVAM_API_KEY", "")
 
 _SYSTEM = """You are a senior application security engineer.
 Generate a minimal, correct unified diff (git diff format) to fix the vulnerability.
@@ -1348,27 +1346,17 @@ Return ONLY the diff — no explanation, no markdown fences."""
 
 
 def generate_llm_patch(sink_type: str, file_path: str, line: int, code_context: str) -> Optional[str]:
-    if not _KEY or not _ENDPOINT:
+    if not _KEY:
         return None
-    try:
-        from openai import AzureOpenAI
-        client = AzureOpenAI(azure_endpoint=_ENDPOINT, api_key=_KEY, api_version="2024-02-01")
-        prompt = f"Fix this {sink_type} vulnerability.\nFile: {file_path}, Line: {line}\n\n```python\n{code_context}\n```\n\nGenerate a unified diff to fix line {line}."
-        for deployment in [_PRIMARY, _FALLBACK]:
-            try:
-                resp = client.chat.completions.create(
-                    model=deployment,
-                    messages=[{"role": "system", "content": _SYSTEM}, {"role": "user", "content": prompt}],
-                    max_tokens=600, temperature=0, timeout=10,
-                )
-                patch = resp.choices[0].message.content.strip()
-                if patch.startswith("---") or patch.startswith("@@"):
-                    return patch
-            except Exception:
-                continue
-        return None
-    except ImportError:
-        return None
+    from openai import OpenAI
+    prompt = f"Fix this {sink_type} vulnerability.\nFile: {file_path}, Line: {line}\n\n```python\n{code_context}\n```\n\nGenerate a unified diff to fix line {line}."
+    with OpenAI(base_url=_BASE_URL, api_key=_KEY, timeout=10, max_retries=0) as client:
+        resp = client.chat.completions.create(
+            model=_MODEL,
+            messages=[{"role": "system", "content": _SYSTEM}, {"role": "user", "content": prompt}],
+            max_tokens=600, temperature=0, reasoning_effort="low", timeout=10,
+        )
+    return resp.choices[0].message.content
 ```
 
 ### 6.2 Deterministic patch templates (zero-cost fallback)
@@ -1626,7 +1614,7 @@ COMPLIANCE_MAP: dict[str, dict] = {
             Say: "Objective 03 — Confirmed now ranks first, above all Code only findings"
 
 [2:30–3:30] Click "Auto-Remediate" on a Confirmed SQL injection alert
-            Show: Azure GPT-4o generating context-aware patch (spinner)
+            Show: Sarvam GLM-5.3 generating context-aware patch (spinner)
             Show: Git diff preview (parameterised query replaces string concat)
             Click "Apply" → patch applied → re-probe fires automatically
             Show: ✅ "Fix Verified — Vulnerability Closed"
@@ -1655,7 +1643,7 @@ COMPLIANCE_MAP: dict[str, dict] = {
 - [ ] Verify wrong route, wrong parameter, wrong code scope, and wrong CWE each remain unlinked
 - [ ] At least 5 Code only findings suppressed (verify suppression ratio ≥ 70%)
 - [ ] "Verify" button fires probe, shows retry loop in probe_history, flips label live
-- [ ] "Auto-Remediate" shows diff preview (GPT-4o or template), applies, re-verifies
+- [ ] "Auto-Remediate" shows diff preview (GLM-5.3 or template), applies, re-verifies
 - [ ] Business risk panel shows all 4 framework mappings (RBI, SEBI, ISO, DPDP 2023)
 - [ ] INC-06 reference visible in business risk panel
 - [ ] All probes complete in < 2 seconds (check network tab)
@@ -1667,7 +1655,7 @@ COMPLIANCE_MAP: dict[str, dict] = {
 
 - Pre-record a 90-second screen capture of the full flow as backup
 - Keep per-target fixtures in `data/sample/` pre-seeded — either profile works offline
-- If Azure OpenAI unavailable: template patches fire automatically — demo continues
+- If Sarvam is unavailable: template patches fire automatically — demo continues
 - Have the LangGraph state JSON ready to show in terminal as last resort
 
 ---

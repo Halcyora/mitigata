@@ -35,8 +35,8 @@ class PatchGenerationError(ValueError):
 class PatchResult:
     content: str
     kind: Literal["unified_diff", "template"]
-    source: Literal["azure_openai", "deterministic_template"]
-    deployment: str | None = None
+    source: Literal["sarvam", "deterministic_template"]
+    model: str | None = None
 
 
 def _normalize_file_path(file_path: str) -> str:
@@ -148,26 +148,19 @@ def validate_unified_diff(patch: str, expected_file: str) -> str | None:
     return patch + "\n"
 
 
-def _configuration() -> tuple[str, str, list[str]] | None:
-    endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "").strip()
-    key = os.environ.get("AZURE_OPENAI_KEY", "").strip()
-    if not endpoint and not key:
+def _configuration() -> tuple[str, str, str] | None:
+    key = os.environ.get("SARVAM_API_KEY", "").strip()
+    if not key:
         return None
-    if not endpoint or not key:
-        logger.warning(
-            "Azure OpenAI patching is not configured: both endpoint and key are required"
-        )
-        return None
-    primary = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-4o").strip()
-    fallback = os.environ.get(
-        "AZURE_OPENAI_FALLBACK_DEPLOYMENT", "gpt-4o-mini"
-    ).strip()
-    if not primary:
-        raise PatchGenerationError("AZURE_OPENAI_DEPLOYMENT cannot be empty")
-    deployments = [primary]
-    if fallback and fallback != primary:
-        deployments.append(fallback)
-    return endpoint, key, deployments
+    base_url = os.environ.get(
+        "SARVAM_BASE_URL", "https://api.sarvam.ai/v2"
+    ).strip().rstrip("/")
+    model = os.environ.get("SARVAM_MODEL", "glm5.3").strip()
+    if not base_url:
+        raise PatchGenerationError("SARVAM_BASE_URL cannot be empty")
+    if not model:
+        raise PatchGenerationError("SARVAM_MODEL cannot be empty")
+    return base_url, key, model
 
 
 def _generate_llm_patch(
@@ -176,7 +169,7 @@ def _generate_llm_patch(
     line: int,
     code_context: str,
 ) -> tuple[str, str] | None:
-    """Generate a validated Azure OpenAI diff; return None if unavailable."""
+    """Generate a validated Sarvam diff; return None if unavailable."""
     normalized_path = _normalize_file_path(file_path)
     if not isinstance(sink_type, str) or not _SAFE_SINK.fullmatch(sink_type):
         raise PatchGenerationError("sink_type contains unsupported characters")
@@ -192,13 +185,13 @@ def _generate_llm_patch(
     configured = _configuration()
     if configured is None:
         return None
-    endpoint, key, deployments = configured
+    base_url, key, model = configured
 
     try:
-        from openai import AzureOpenAI, OpenAIError
+        from openai import OpenAI, OpenAIError
     except ImportError as exc:
         raise PatchGenerationError(
-            "Azure patching is configured but the openai package is not installed"
+            "Sarvam patching is configured but the openai package is not installed"
         ) from exc
 
     prompt = (
@@ -211,60 +204,48 @@ def _generate_llm_patch(
         f"Return a minimal single-file unified diff for {normalized_path}."
     )
     try:
-        client = AzureOpenAI(
-            azure_endpoint=endpoint,
+        client = OpenAI(
+            base_url=base_url,
             api_key=key,
-            api_version="2024-02-01",
             timeout=10.0,
             max_retries=0,
         )
     except OpenAIError as exc:
-        logger.warning("Azure OpenAI patch client initialization failed: %s", exc)
+        logger.warning("Sarvam patch client initialization failed: %s", exc)
         return None
 
     result: tuple[str, str] | None = None
     try:
-        for deployment in deployments:
-            try:
-                response = client.chat.completions.create(
-                    model=deployment,
-                    messages=[
-                        {"role": "system", "content": _SYSTEM},
-                        {"role": "user", "content": prompt},
-                    ],
-                    max_tokens=1200,
-                    temperature=0,
-                    timeout=10.0,
-                )
-            except OpenAIError as exc:
-                logger.warning(
-                    "Azure OpenAI patch request failed for deployment %s: %s",
-                    deployment,
-                    exc,
-                )
-                continue
-            if not response.choices:
-                logger.warning(
-                    "Azure OpenAI returned no patch choices for deployment %s",
-                    deployment,
-                )
-                continue
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": _SYSTEM},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=1200,
+                temperature=0,
+                reasoning_effort="low",
+                timeout=10.0,
+            )
+        except OpenAIError as exc:
+            logger.warning("Sarvam patch request failed for model %s: %s", model, exc)
+            return None
+        if not response.choices:
+            logger.warning("Sarvam returned no patch choices for model %s", model)
+        else:
             content = response.choices[0].message.content
             if not content:
-                logger.warning(
-                    "Azure OpenAI returned an empty patch for deployment %s",
-                    deployment,
-                )
-                continue
-            validated = validate_unified_diff(content, normalized_path)
-            if validated is None:
-                logger.warning(
-                    "Rejected invalid or out-of-scope patch from deployment %s",
-                    deployment,
-                )
-                continue
-            result = validated, deployment
-            break
+                logger.warning("Sarvam returned an empty patch for model %s", model)
+            else:
+                validated = validate_unified_diff(content, normalized_path)
+                if validated is None:
+                    logger.warning(
+                        "Rejected invalid or out-of-scope patch from Sarvam model %s",
+                        model,
+                    )
+                else:
+                    result = validated, model
     finally:
         client.close()
     return result
@@ -276,7 +257,7 @@ def generate_llm_patch(
     line: int,
     code_context: str,
 ) -> str | None:
-    """Generate a validated Azure OpenAI diff; return None if unavailable."""
+    """Generate a validated Sarvam diff; return None if unavailable."""
     result = _generate_llm_patch(sink_type, file_path, line, code_context)
     return result[0] if result is not None else None
 
@@ -287,24 +268,24 @@ def generate_patch(
     line: int,
     code_context: str,
 ) -> PatchResult:
-    """Try Azure OpenAI first, then return a deterministic sink template."""
+    """Try Sarvam first, then return a deterministic sink template."""
     normalized_path = _normalize_file_path(file_path)
     llm_result = _generate_llm_patch(
         sink_type, normalized_path, line, code_context
     )
     if llm_result is not None:
-        llm_patch, deployment = llm_result
+        llm_patch, model = llm_result
         return PatchResult(
             content=llm_patch,
             kind="unified_diff",
-            source="azure_openai",
-            deployment=deployment,
+            source="sarvam",
+            model=model,
         )
 
     template = get_template_patch(sink_type)
     if template is None:
         raise PatchGenerationError(
-            f"No Azure patch was available and no template exists for {sink_type!r}"
+            f"No Sarvam patch was available and no template exists for {sink_type!r}"
         )
     return PatchResult(
         content=template,

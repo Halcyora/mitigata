@@ -72,17 +72,19 @@ status; callers must supply that evidence explicitly.
 ## Phase 6 patch suggestions
 
 `engine.patch_engine.generate_patch(sink_type, file_path, line, code_context)`
-tries Azure OpenAI first when `AZURE_OPENAI_ENDPOINT` and `AZURE_OPENAI_KEY` are
-configured. It uses `AZURE_OPENAI_DEPLOYMENT` (default `gpt-4o`) and then
-`AZURE_OPENAI_FALLBACK_DEPLOYMENT` (default `gpt-4o-mini`). Source context is sent
-to that configured Azure endpoint, so configure it only for code that is
-approved for that service. Requests use a 10-second timeout and no SDK retries.
+tries Sarvam Token Factory when `SARVAM_API_KEY` is configured. It uses
+`SARVAM_BASE_URL` (default `https://api.sarvam.ai/v2`) and `SARVAM_MODEL`
+(default `glm5.3`). Source context is sent to Sarvam, so configure it only for
+code that is approved for that service. Requests use a 10-second timeout and no
+SDK retries. Add your Sarvam key to `HACKATHON/.env`; never commit it.
+Run `python scripts/check_sarvam.py` from `HACKATHON/` to verify the configured
+key and model with a minimal chat completion.
 
 Only a bounded single-file unified diff with valid hunk counts and exact
 repository-relative `a/` and `b/` paths is returned as an LLM patch. Malformed,
 empty, or out-of-scope model output is rejected; API errors and invalid model
-output are logged before trying the fallback deployment. If no valid LLM patch
-is available, a deterministic sink template is returned for SQL injection,
+output are logged before falling back to deterministic templates. If no valid
+LLM patch is available, a deterministic sink template is returned for SQL injection,
 XSS, command injection, weak password hashes, JWT verification, or SSTI.
 `PatchResult.kind` distinguishes a diff from a remediation snippet; neither is
 applied automatically. Callers must review a result in the context of the

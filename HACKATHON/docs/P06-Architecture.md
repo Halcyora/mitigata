@@ -56,7 +56,7 @@ flowchart TD
 
     subgraph OBJ3["🎯 Objective 03 — Prioritise (FR-7, FR-8, FR-9)"]
         CLS["3-Label Classifier\nConfirmed 🔴 Rank 1\nCode only 🟡 Rank 2\nRuntime only 🟠 Rank 3"]
-        PATCH["Patch Engine B-4\nGPT-4o → template\ngit diff + re-verify"]
+        PATCH["Patch Engine B-4\nSarvam GLM-5.3 → template\ngit diff + re-verify"]
         COMP["Compliance Translator\nINR exposure · RBI · SEBI\nISO 27001 · DPDP 2023\nINC-06 reference"]
         LG --> CLS
         CLS --> PATCH
@@ -222,11 +222,9 @@ flowchart TD
 ```mermaid
 flowchart LR
     SEL([User selects\nConfirmed finding]) --> CTX[Read code context\n/target-src line±5]
-    CTX --> GPT4O{Azure GPT-4o\navailable?}
-    GPT4O -->|Yes| LLM[GPT-4o generates\nunified diff\ntemp=0 · 10s timeout]
-    GPT4O -->|No| MINI{GPT-4o-mini\navailable?}
-    MINI -->|Yes| LLM
-    MINI -->|No| TPL[Template patch\nfrom PATCH_TEMPLATES\nzero cost · always works]
+    CTX --> SARVAM{Sarvam GLM-5.3\navailable?}
+    SARVAM -->|Yes| LLM[GLM-5.3 generates\nunified diff\ntemp=0 · 10s timeout]
+    SARVAM -->|No| TPL[Template patch\nfrom PATCH_TEMPLATES\nzero cost · always works]
 
     LLM --> VALID{Starts with\n--- or @@?}
     VALID -->|Yes| DIFF[Show Git diff\npreview in UI]
@@ -440,9 +438,8 @@ flowchart LR
         FIND["Confirmed finding\nsink_type · file · line\ncode context ±5 lines"]
     end
 
-    subgraph CHAIN["GPT-4o → GPT-4o-mini → Template fallback"]
-        GPT4O["Azure GPT-4o\ntemp=0 · 10s timeout\nreturns unified diff"]
-        MINI["Azure GPT-4o-mini\nfallback · faster"]
+    subgraph CHAIN["Sarvam GLM-5.3 → Template fallback"]
+        SARVAM["Sarvam Token Factory GLM-5.3\ntemp=0 · 10s timeout\nreturns unified diff"]
         TPL["PATCH_TEMPLATES dict\nzero cost · always available\nCWE-89: parameterised query\nCWE-79: markupsafe.escape\nCWE-78: subprocess list args\nCWE-347: env JWT secret\nCWE-94: render_template()\nCWE-916: bcrypt"]
     end
 
@@ -495,7 +492,7 @@ graph LR
         G["GET /api/graph\nfull correlation graph\n≤10s · ELK layout"]
         V["POST /api/verify/{id}\nLangGraph probe\nSSE stream"]
         VS["GET /api/verify/{id}/stream\nSSE for EventSource"]
-        P["POST /api/patch/{id}\ngenerate patch\nGPT-4o → template"]
+        P["POST /api/patch/{id}\ngenerate patch\nSarvam GLM-5.3 → template"]
         PA["POST /api/patch/{id}/apply\napply + re-verify"]
         C["GET /api/compliance/{id}\nINR + 4 frameworks"]
         F["GET /api/findings\nall findings sorted\nConfirmed first"]
@@ -839,7 +836,7 @@ gantt
     Node click → detail          :0, 1
 
     section Patch
-    GPT-4o patch generation      :0, 10
+    GLM-5.3 patch generation    :0, 10
     Template patch (fallback)    :0, 1
     git apply + re-verify        :0, 3
     Total patch + re-verify      :crit, 0, 15
@@ -857,7 +854,7 @@ gantt
 | Single LangGraph probe | **≤ 2s** | `httpx timeout=2.0` |
 | Probe + retry | ≤ 4s | 2 × 2s probes |
 | UI initial render | **≤ 3s** | pre-computed ELK positions |
-| Patch generation (GPT-4o) | ≤ 10s | 10s timeout on LLM |
+| Patch generation (GLM-5.3) | ≤ 10s | 10s timeout on LLM |
 | Patch generation (template) | < 50ms | dict lookup |
 | Total patch + re-verify | **≤ 15s** | within PRD budget |
 | Full scan + report | **< 5 min** | pre-seeded data + targeted probes |

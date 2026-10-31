@@ -31,7 +31,7 @@ def _install_fake_openai(monkeypatch, responses):
     class OpenAIError(Exception):
         pass
 
-    class FakeAzureOpenAI:
+    class FakeOpenAI:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
             self.chat = SimpleNamespace(
@@ -49,7 +49,7 @@ def _install_fake_openai(monkeypatch, responses):
             return result
 
     fake_openai = ModuleType("openai")
-    fake_openai.AzureOpenAI = FakeAzureOpenAI
+    fake_openai.OpenAI = FakeOpenAI
     fake_openai.OpenAIError = OpenAIError
     monkeypatch.setitem(sys.modules, "openai", fake_openai)
     return OpenAIError
@@ -125,14 +125,13 @@ def test_patch_input_rejects_invalid_line_and_oversized_context():
         )
 
 
-def test_llm_patcher_tries_primary_then_fallback_and_validates_result(monkeypatch):
-    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com")
-    monkeypatch.setenv("AZURE_OPENAI_KEY", "test-key")
-    monkeypatch.setenv("AZURE_OPENAI_DEPLOYMENT", "primary")
-    monkeypatch.setenv("AZURE_OPENAI_FALLBACK_DEPLOYMENT", "fallback")
+def test_llm_patcher_uses_sarvam_model_and_validates_result(monkeypatch):
+    monkeypatch.setenv("SARVAM_API_KEY", "test-key")
+    monkeypatch.setenv("SARVAM_BASE_URL", "https://api.sarvam.ai/v2")
+    monkeypatch.setenv("SARVAM_MODEL", "glm5.3")
     responses = {
         "requests": [],
-        "results": [_response("not a diff"), _response(_VALID_DIFF)],
+        "results": [_response(_VALID_DIFF)],
     }
     _install_fake_openai(monkeypatch, responses)
 
@@ -140,12 +139,11 @@ def test_llm_patcher_tries_primary_then_fallback_and_validates_result(monkeypatc
 
     assert result.content == _VALID_DIFF
     assert result.kind == "unified_diff"
-    assert result.source == "azure_openai"
-    assert result.deployment == "fallback"
-    assert [request[1]["model"] for request in responses["requests"]] == [
-        "primary",
-        "fallback",
-    ]
+    assert result.source == "sarvam"
+    assert result.model == "glm5.3"
+    assert responses["requests"][0][0]["base_url"] == "https://api.sarvam.ai/v2"
+    assert responses["requests"][0][1]["model"] == "glm5.3"
+    assert responses["requests"][0][1]["reasoning_effort"] == "low"
     assert responses["requests"][0][0]["timeout"] == 10.0
     assert responses["requests"][0][0]["max_retries"] == 0
     prompt = responses["requests"][0][1]["messages"][1]["content"]
@@ -154,8 +152,7 @@ def test_llm_patcher_tries_primary_then_fallback_and_validates_result(monkeypatc
 
 
 def test_unexpected_sdk_errors_are_not_silently_swallowed(monkeypatch, caplog):
-    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com")
-    monkeypatch.setenv("AZURE_OPENAI_KEY", "test-key")
+    monkeypatch.setenv("SARVAM_API_KEY", "test-key")
     responses = {
         "requests": [],
         "results": [
@@ -177,33 +174,24 @@ def test_unexpected_sdk_errors_are_not_silently_swallowed(monkeypatch, caplog):
 
 
 def test_configured_api_errors_log_and_fall_back(monkeypatch, caplog):
-    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com")
-    monkeypatch.setenv("AZURE_OPENAI_KEY", "test-key")
-    monkeypatch.setenv("AZURE_OPENAI_FALLBACK_DEPLOYMENT", "fallback-second")
+    monkeypatch.setenv("SARVAM_API_KEY", "test-key")
     responses = {
         "requests": [],
         "results": [],
     }
     api_error = _install_fake_openai(monkeypatch, responses)
-    responses["results"].extend(
-        [
-            api_error("primary unavailable"),
-            _response("bad diff"),
-            _response("also bad"),
-        ]
-    )
+    responses["results"].append(api_error("Sarvam unavailable"))
     with caplog.at_level(logging.WARNING):
         result = generate_patch("sql_injection", "app/routes.py", 10, "source")
 
     assert result.kind == "template"
     assert result.source == "deterministic_template"
-    assert "primary unavailable" in caplog.text
-    assert len(responses["requests"]) == 2
+    assert "Sarvam unavailable" in caplog.text
+    assert len(responses["requests"]) == 1
 
 
 def test_missing_configuration_uses_template_without_openai(monkeypatch):
-    monkeypatch.delenv("AZURE_OPENAI_ENDPOINT", raising=False)
-    monkeypatch.delenv("AZURE_OPENAI_KEY", raising=False)
+    monkeypatch.delenv("SARVAM_API_KEY", raising=False)
 
     result = generate_patch("ssti", "app/templates.py", 20, "unsafe context")
 
@@ -212,8 +200,7 @@ def test_missing_configuration_uses_template_without_openai(monkeypatch):
 
 
 def test_unknown_sink_without_llm_patch_is_an_explicit_error(monkeypatch):
-    monkeypatch.delenv("AZURE_OPENAI_ENDPOINT", raising=False)
-    monkeypatch.delenv("AZURE_OPENAI_KEY", raising=False)
+    monkeypatch.delenv("SARVAM_API_KEY", raising=False)
 
     with pytest.raises(PatchGenerationError, match="no template exists"):
         generate_patch("unknown_sink", "app/routes.py", 1, "source")
