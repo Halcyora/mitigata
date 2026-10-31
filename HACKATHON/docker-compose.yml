@@ -1,4 +1,25 @@
 services:
+  semgrep:
+    image: semgrep/semgrep:1.144.0
+    profiles:
+      - scanners
+    entrypoint:
+      - semgrep
+    networks:
+      - scanner-egress
+    volumes:
+      - ./targets:/targets:ro
+      - ./data/raw:/output
+
+  zap:
+    image: ghcr.io/zaproxy/zaproxy:2.16.1
+    profiles:
+      - scanners
+    networks:
+      - internal
+    volumes:
+      - ./data/raw:/output
+
   target-flask:
     build:
       context: ./targets/vulnerable_flask
@@ -78,3 +99,4 @@ networks:
   internal:
     internal: true
   public:
+  scanner-egress:

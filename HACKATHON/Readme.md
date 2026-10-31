@@ -1,12 +1,13 @@
 # SAST-DAST Correlator
 
-## Current phase: target applications and Docker
+## Current phase: targets, scanners, and Docker
 
 The current codebase contains Python and JavaScript route parsers. Phase 1 adds
 pinned upstream targets, per-target profiles, and a Docker Compose network that
 keeps intentionally vulnerable apps isolated from host access.
 
-From this directory, in PowerShell:
+From this directory, in PowerShell, fetch the target sources and start the
+engine, dashboard, and target applications:
 
 ```powershell
 .\scripts\fetch_targets.ps1
@@ -15,9 +16,25 @@ docker compose up --build
 ```
 
 Compose builds and starts the Flask reference app and OWASP Juice Shop. Neither
-target publishes a port to the host. Later scanner/API services will join their
-internal Docker network. Do not expose these target containers to untrusted
-networks.
+target publishes a port to the host. Scanner images are configured as on-demand
+Compose services: Semgrep can read target source but cannot reach the target
+network; ZAP can reach only the isolated target network. Do not expose these
+intentionally vulnerable target containers to untrusted networks.
+
+Run a real SAST scan, or SAST plus the bounded ZAP active scan, from this
+directory:
+
+```powershell
+python scripts/run_scan.py configs/flask_demo.yaml
+python scripts/run_scan.py configs/flask_demo.yaml --dast
+python scripts/run_scan.py configs/juice_shop.yaml --dast
+```
+
+The first scan pulls the pinned scanner images. Semgrep also needs outbound
+network access to resolve configured rule packs. ZAP is limited to the target
+service named by the selected profile; its spider and full scan have configured
+time bounds. JSON reports are written under `data/raw/`. Scanner failures stop
+the command instead of silently substituting sample or placeholder findings.
 
 The Flask wheelhouse is downloaded on the host using its trusted certificate
 store, then installed offline in the container. This avoids weakening TLS
