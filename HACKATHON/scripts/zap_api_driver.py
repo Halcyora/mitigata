@@ -271,6 +271,13 @@ def _run_task(
     task_url, method, post_data = _request_data({**task, "url": task_url})
     _ensure_origin(task_url, expected_origin)
     _apply_policy(client, task, available_scanners)
+    client.request(
+        "core",
+        "action",
+        "accessUrl",
+        url=task_url,
+        followRedirects="false",
+    )
     spider = client.request(
         "spider",
         "action",

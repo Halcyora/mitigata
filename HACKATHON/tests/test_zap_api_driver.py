@@ -188,6 +188,13 @@ def test_execute_runs_targeted_tasks_before_broad_and_limits_context(monkeypatch
         call for call in calls if call[:3] == ("context", "action", "includeInContext")
     ]
     assert context_includes[0][3]["regex"] == r"^http://target\-flask:5050(?:/.*)?$"
+    access_urls = [
+        call for call in calls if call[:3] == ("core", "action", "accessUrl")
+    ]
+    assert access_urls[0][3] == {
+        "url": "http://target-flask:5050/orders?q=mitigata_scan",
+        "followRedirects": "false",
+    }
     spiders = [call for call in calls if call[:3] == ("spider", "action", "scan")]
     scans = [call for call in calls if call[:3] == ("ascan", "action", "scan")]
     assert spiders[0][3]["url"].endswith("?q=mitigata_scan")

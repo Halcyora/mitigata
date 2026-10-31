@@ -96,6 +96,8 @@ def run_compose(command: list[str]) -> subprocess.CompletedProcess[str]:
             cwd=str(ROOT),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
         )
     except FileNotFoundError as exc:
@@ -114,6 +116,8 @@ def run_docker(
             input=input_text,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
         )
     except FileNotFoundError as exc:
