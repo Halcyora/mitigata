@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import secrets
 import subprocess
 import sys
 import uuid
@@ -13,6 +14,14 @@ from urllib.parse import urlsplit
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from engine.adapters.base import TargetProfile
+from engine.ast_mapper.call_graph import build_call_graph
+from engine.dast_planner.planner import ScanPlan, build_scan_plan
+from engine.ingestion.semgrep_parser import parse_semgrep_json
+
 DATA_DIR = ROOT / "data"
 RAW_DIR = DATA_DIR / "raw"
 TARGETS_DIR = ROOT / "targets"
@@ -92,6 +101,34 @@ def run_compose(command: list[str]) -> subprocess.CompletedProcess[str]:
         raise RuntimeError("Docker Compose is required to run containerized scans") from exc
 
 
+def run_docker(
+    command: list[str],
+    *,
+    input_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            ["docker", *command],
+            cwd=str(ROOT),
+            input=input_text,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("Docker is required to run containerized scans") from exc
+
+
+def write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
 def scan_report(
     target_id: str,
     scan_name: str,
@@ -159,12 +196,138 @@ def run_semgrep(profile: dict) -> dict:
     return report
 
 
-def run_dast(profile: dict) -> dict:
+def _build_profile_scan_plan(profile: dict, budget_minutes: int) -> ScanPlan:
     target_id = profile["target_id"]
-    service, target_url = validate_target(profile)
-    max_minutes = int(profile.get("zap_max_minutes", 5))
-    if not 1 <= max_minutes <= 30:
-        raise ValueError("zap_max_minutes must be between 1 and 30")
+    _, target_url = validate_target(profile)
+    source_dir = resolve_source_dir(profile["source_dir"])
+    if not source_dir.is_dir():
+        raise FileNotFoundError(f"Target source directory does not exist: {source_dir}")
+    language = profile.get("language")
+    framework = profile.get("framework")
+    if not isinstance(language, str) or not isinstance(framework, str):
+        raise ValueError(f"Target profile {target_id!r} lacks adapter metadata")
+    graph = build_call_graph(
+        TargetProfile(
+            target_id=target_id,
+            language=language,
+            framework=framework,
+            source_dir=source_dir,
+        )
+    )
+    routes = graph.get("routes")
+    if not isinstance(routes, list):
+        raise ValueError("AST route mapper did not return a route inventory")
+    semgrep_path = RAW_DIR / f"{target_id}-semgrep.json"
+    if not semgrep_path.is_file():
+        raise FileNotFoundError(
+            f"SAST report is required before targeted DAST: {semgrep_path}"
+        )
+    findings = parse_semgrep_json(semgrep_path, target_id)
+    return build_scan_plan(
+        target_id,
+        target_url,
+        findings,
+        routes,
+        budget_minutes=budget_minutes,
+    )
+
+
+def run_zap_plan(plan: ScanPlan) -> dict:
+    target_id = plan.target_id
+    plan_path = RAW_DIR / f"{target_id}-scan-plan.json"
+    report_path = RAW_DIR / f"{target_id}-zap.json"
+    write_json(plan_path, plan.to_dict())
+
+    container_name = f"mitigata-zap-{uuid.uuid4().hex[:12]}"
+    api_key = secrets.token_urlsafe(32)
+    started = run_compose(
+        [
+            "--profile",
+            "scanners",
+            "run",
+            "--detach",
+            "--name",
+            container_name,
+            "--no-deps",
+            "--entrypoint",
+            "zap.sh",
+            "zap",
+            "-daemon",
+            "-host",
+            "127.0.0.1",
+            "-port",
+            "8090",
+            "-config",
+            f"api.key={api_key}",
+            "-config",
+            "telemetry.enabled=false",
+        ]
+    )
+    if started.returncode != 0:
+        details = (started.stderr or started.stdout).strip()
+        raise RuntimeError(
+            f"Could not start isolated ZAP daemon: "
+            f"{details[-2000:] or 'no diagnostic output'}"
+        )
+
+    driver_input = json.dumps({"api_key": api_key, "plan": plan.to_dict()})
+    try:
+        execution = run_docker(
+            [
+                "exec",
+                "-i",
+                container_name,
+                "python3",
+                "/workspace/zap_api_driver.py",
+            ],
+            input_text=driver_input,
+        )
+        if execution.returncode != 0:
+            details = (execution.stderr or execution.stdout).strip()
+            raise RuntimeError(
+                f"ZAP route orchestration failed: "
+                f"{details[-3000:] or 'no diagnostic output'}"
+            )
+        report = json.loads(execution.stdout)
+        if not isinstance(report, dict) or not isinstance(report.get("alerts"), list):
+            raise ValueError("ZAP orchestrator returned an invalid scan report")
+        if not isinstance(report.get("tasks"), list):
+            raise ValueError("ZAP orchestrator report is missing task states")
+        task_states = {
+            task.get("task_id"): task
+            for task in report["tasks"]
+            if isinstance(task, dict)
+        }
+        for task in [*plan.targeted_tasks, *plan.broad_tasks]:
+            state = task_states.get(task.task_id)
+            if state is not None:
+                task.status = str(state.get("status", task.status))
+            task_dict = state or {}
+            for field in ("started_at", "finished_at", "progress", "error"):
+                if field in task_dict:
+                    setattr(task, field, task_dict[field])
+        plan.status = str(report.get("scan_status", plan.status))
+        write_json(plan_path, plan.to_dict())
+        write_json(report_path, report)
+        return report
+    finally:
+        stopped = run_docker(["rm", "-f", container_name])
+        if stopped.returncode != 0:
+            details = (stopped.stderr or stopped.stdout).strip()
+            raise RuntimeError(
+                f"Could not remove temporary ZAP container {container_name}: "
+                f"{details[-1000:] or 'no diagnostic output'}"
+            )
+
+
+def run_dast(profile: dict, *, budget_minutes: int | None = None) -> dict:
+    target_id = profile["target_id"]
+    service, _ = validate_target(profile)
+    selected_budget = budget_minutes
+    if selected_budget is None:
+        selected_budget = int(profile.get("zap_max_minutes", 5))
+    if not 1 <= selected_budget <= 30:
+        raise ValueError("DAST time budget must be between 1 and 30 minutes")
 
     target_start = run_compose(["up", "--detach", "--wait", service])
     if target_start.returncode != 0:
@@ -174,26 +337,8 @@ def run_dast(profile: dict) -> dict:
             f"{details[-2000:] or 'no diagnostic output'}"
         )
 
-    command = [
-        "--profile",
-        "scanners",
-        "run",
-        "--rm",
-        "--no-deps",
-        "zap",
-        "zap-full-scan.py",
-        "-t",
-        target_url,
-        "-J",
-        "{report}",
-        "-m",
-        str(max_minutes),
-        "-T",
-        str(max_minutes * 2),
-        "-I",
-    ]
-    report = scan_report(target_id, "zap", command, {0, 1, 2}, ("alerts", "site"))
-    return report
+    plan = _build_profile_scan_plan(profile, selected_budget)
+    return run_zap_plan(plan)
 
 
 def count_zap_alerts(report: dict) -> int:
@@ -221,6 +366,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run containerized SAST/DAST scans for a target profile.")
     parser.add_argument("config", help="Path to a YAML profile file, e.g. configs/flask_demo.yaml")
     parser.add_argument("--dast", action="store_true", help="Also run the bounded ZAP active scan")
+    parser.add_argument("--dast-minutes", type=int, help="Override the 1-30 minute DAST time budget")
     args = parser.parse_args()
 
     profile = load_profile(args.config)
@@ -231,8 +377,14 @@ def main() -> int:
     print(f"SAST output: {RAW_DIR / f'{target_id}-semgrep.json'} ({len(sast.get('results', []))} results)")
 
     if args.dast:
-        zap = run_dast(profile)
-        print(f"DAST output: {RAW_DIR / f'{target_id}-zap.json'} ({count_zap_alerts(zap)} alerts)")
+        zap = run_dast(profile, budget_minutes=args.dast_minutes)
+        coverage = zap.get("coverage", {})
+        print(
+            f"DAST output: {RAW_DIR / f'{target_id}-zap.json'} "
+            f"({count_zap_alerts(zap)} alerts; {zap.get('scan_status')}; "
+            f"{coverage.get('targeted_completed', 0)} targeted and "
+            f"{coverage.get('broad_completed', 0)} broad tasks completed)"
+        )
 
     return 0
 

@@ -2,13 +2,20 @@
 
 ## Semgrep-Guided, GraphCodeBERT-Assisted, Route-Aware, Time-Budgeted DAST
 
-**Status:** Proposed architecture improvement\
+**Status:** Deterministic route planning and bounded ZAP orchestration implemented; remaining phases proposed\
 **Applies to:** P06 SAST & DAST Correlation Engine\
 **Baseline:** `P06-Architecture.md` (Architecture v1.3)\
 **Primary change:** Replace the current broad-first DAST execution
 strategy with a prioritized, feedback-driven scan plan. Add an optional
 GraphCodeBERT-based code-context layer to help rank ambiguous route/finding
 candidates without replacing deterministic analysis or runtime verification.
+
+**Implementation note:** `scripts/run_scan.py --dast` now maps normalized
+Semgrep findings to the existing AST route inventory, runs supported
+CWE-specific ZAP checks before route-wide coverage, and records task outcomes
+and budget cutoffs under `data/raw/`. The initial verified rule map is limited
+to CWE-22, CWE-78, CWE-79, CWE-89, and CWE-601. GraphCodeBERT, incremental
+correlation/UI events, and the controlled benchmark remain proposed work.
 
 ------------------------------------------------------------------------
 

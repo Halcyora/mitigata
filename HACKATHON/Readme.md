@@ -21,20 +21,34 @@ Compose services: Semgrep can read target source but cannot reach the target
 network; ZAP can reach only the isolated target network. Do not expose these
 intentionally vulnerable target containers to untrusted networks.
 
-Run a real SAST scan, or SAST plus the bounded ZAP active scan, from this
-directory:
+Run a real SAST scan, or SAST followed by Semgrep-guided targeted DAST and
+broader route coverage, from this directory:
 
 ```powershell
 python scripts/run_scan.py configs/flask_demo.yaml
 python scripts/run_scan.py configs/flask_demo.yaml --dast
 python scripts/run_scan.py configs/juice_shop.yaml --dast
+python scripts/run_scan.py configs/flask_demo.yaml --dast --dast-minutes 3
 ```
 
 The first scan pulls the pinned scanner images. Semgrep also needs outbound
-network access to resolve configured rule packs. ZAP is limited to the target
-service named by the selected profile; its spider and full scan have configured
-time bounds. JSON reports are written under `data/raw/`. Scanner failures stop
-the command instead of silently substituting sample or placeholder findings.
+network access to resolve configured rule packs. For DAST, the AST route
+inventory is joined to normalized Semgrep findings by target-relative file and
+line scope. Explainable priority tiers schedule mapped route/method/CWE rule
+tasks first; ZAP enables only the mapped scanners for those tasks, then tests
+the route inventory with remaining supported scanners. ZAP's API runs inside
+the scanner container, is bound to loopback, and uses an exact selected-target
+context; route-seed spidering is restricted to that target and the selected
+route subtree.
+
+The initial rule map covers CWE-22, CWE-78, CWE-79, CWE-89, and CWE-601 using
+scanner IDs verified in the pinned ZAP image. Unsupported input bindings (JSON
+body and headers) are recorded in the plan rather than fabricated. DAST has a
+1-30 minute budget (default 5); task states, priorities, route evidence, and
+coverage are written to `data/raw/<target>-scan-plan.json`, while standard
+ZAP alerts and task outcomes are written to `data/raw/<target>-zap.json`.
+Untested routes are reported as incomplete, not safe. Scanner failures stop the
+command instead of silently substituting sample or placeholder findings.
 
 The Flask wheelhouse is downloaded on the host using its trusted certificate
 store, then installed offline in the container. This avoids weakening TLS

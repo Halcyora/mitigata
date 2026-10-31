@@ -19,6 +19,7 @@ services:
       - internal
     volumes:
       - ./data/raw:/output
+      - ./scripts:/workspace:ro
 
   target-flask:
     build:

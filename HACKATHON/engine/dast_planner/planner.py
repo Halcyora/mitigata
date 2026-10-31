@@ -45,6 +45,10 @@ class ScanTask:
     parameters: list[dict[str, str]] = field(default_factory=list)
     parameter_limitation: str | None = None
     status: str = "QUEUED"
+    started_at: str | None = None
+    finished_at: str | None = None
+    progress: int | None = None
+    error: str | None = None
 
 
 @dataclass
@@ -81,6 +85,22 @@ def _task_id(
 ) -> str:
     identity = "|".join((route_id, method, phase, *rule_ids))
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
+
+
+def _parameter_limitation(route: RouteNode) -> str | None:
+    unsupported = sorted(
+        {
+            parameter.source
+            for parameter in route.input_parameters
+            if parameter.source in {"json", "header"}
+        }
+    )
+    if not unsupported:
+        return None
+    return (
+        "ZAP scan API cannot bind these AST inputs directly: "
+        + ", ".join(unsupported)
+    )
 
 
 def _matching_findings(
@@ -123,7 +143,7 @@ def _task_priority(
         for finding in matching
     )
     if has_multiple_candidates:
-        return 3, ["MULTIPLE_ROUTE_CANDIDATES"]
+        return 3, ["SAST_CWE_MATCH", "MULTIPLE_ROUTE_CANDIDATES"]
     if is_exact_scope and supported_inputs:
         return 0, ["SAST_CWE_MATCH", "ROUTE_SCOPE_MATCH", "PARAMETER_SURFACE_MATCH"]
     if not is_exact_scope and supported_inputs:
@@ -195,10 +215,16 @@ def build_scan_plan(
                                 {"name": parameter.name, "source": parameter.source}
                                 for parameter in route.input_parameters
                             ],
+                            parameter_limitation=_parameter_limitation(route),
                         )
                         targeted_by_key[key] = task
                     if finding.id not in task.finding_ids:
                         task.finding_ids.append(finding.id)
+                    task.priority_score = min(
+                        task.priority_score,
+                        priority_class * 100
+                        + _SEVERITY_ORDER.get(finding.severity.upper(), 5),
+                    )
                     for reason in base_reasons:
                         if reason not in task.reason_codes:
                             task.reason_codes.append(reason)
@@ -226,6 +252,7 @@ def build_scan_plan(
                         {"name": parameter.name, "source": parameter.source}
                         for parameter in route.input_parameters
                     ],
+                    parameter_limitation=_parameter_limitation(route),
                 )
             )
 
