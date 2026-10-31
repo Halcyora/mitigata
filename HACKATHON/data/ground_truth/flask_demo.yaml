@@ -1,0 +1,75 @@
+target_id: flask_demo
+language: python
+framework: flask
+target_revision: b6a4f97afd466e83e1f60781494252dec1c37039
+kind: reference_fixture
+route_findings:
+  - route: "POST /login"
+    handler: login()
+    vulnerability: JWT signed with hardcoded 'secret'
+    cwe_id: CWE-347
+    obj_01_type: Broken Auth
+    expected_label: Confirmed
+  - route: "POST /register/user"
+    handler: reg_customer()
+    vulnerability: MD5 password hashing
+    cwe_id: CWE-916
+    obj_01_type: Weak Crypto
+    expected_label: Confirmed
+  - route: "POST /fetch/customer"
+    handler: fetch_customer()
+    vulnerability: JWT decoded with verify=False
+    cwe_id: CWE-347
+    obj_01_type: Broken Auth
+    expected_label: Confirmed
+  - route: "GET /"
+    handler: sitemap()
+    vulnerability: Exposes full route map
+    cwe_id: CWE-200
+    obj_01_type: Info Disclosure
+    expected_label: Code only
+  - route: "404 handler"
+    handler: pnf(e)
+    vulnerability: SSTI via request.url in render_template_string
+    cwe_id: CWE-94
+    obj_01_type: SSTI
+    expected_label: "Code only -> Confirmed after probe"
+  - route: "Config"
+    handler: SECRET_KEY_HMAC
+    vulnerability: Hardcoded JWT secret
+    cwe_id: CWE-798
+    obj_01_type: Hardcoded Credentials
+    expected_label: Runtime only
+legacy_dead_code:
+  - function: _legacy_export_users
+    cwe_id: CWE-89
+    description: raw SQL concatenation
+  - function: _legacy_run_report
+    cwe_id: CWE-78
+    description: command injection
+  - function: _legacy_deserialise_session
+    cwe_id: CWE-502
+    description: unsafe pickle deserialisation
+  - function: _legacy_eval_formula
+    cwe_id: CWE-95
+    description: eval injection
+  - function: _legacy_template_render
+    cwe_id: CWE-94
+    description: server-side template injection
+  - function: _legacy_sql_report
+    cwe_id: CWE-89
+    description: f-string SQL query construction
+  - function: _legacy_render_xss
+    cwe_id: CWE-79
+    description: reflected XSS
+  - function: _legacy_path_read
+    cwe_id: CWE-22
+    description: path traversal
+  - function: _legacy_redirect
+    cwe_id: CWE-601
+    description: open redirect
+suppression_summary:
+  unreachable_helpers: 9
+  reachable_route_findings: 5
+  expected_total: 14
+  notes: The dead-code suppression set intentionally models unreachable SAST findings that should remain Code only.

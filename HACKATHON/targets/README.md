@@ -19,6 +19,11 @@ ports are not published to the host. This keeps the intentionally vulnerable
 applications isolated; later scanner/API services should join this network to
 reach them. Do not expose these target containers to an untrusted network.
 
+The Flask fixture's reference findings are tracked in
+`targets/vulnerable_flask/GROUND_TRUTH.md` and
+`data/ground_truth/flask_demo.yaml`. Those files define the expected route,
+CWE, and suppressed dead-code behaviour used by the Phase 1 scoring model.
+
 Juice Shop runs the official `v20.3.0` container image by immutable digest,
 matching the pinned source tag used for static analysis. Flask dependencies
 are downloaded as Linux/Python 3.11 wheels on the host and installed offline

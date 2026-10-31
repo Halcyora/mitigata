@@ -1,3 +1,5 @@
+version: "3.9"
+
 services:
   target-flask:
     build:
@@ -6,7 +8,7 @@ services:
     environment:
       APP_PORT: "5050"
     networks:
-      - targets
+      - internal
     healthcheck:
       test:
         - CMD
@@ -22,7 +24,7 @@ services:
   target-juice-shop:
     image: bkimminich/juice-shop:v20.3.0@sha256:cea5a4af4aacee498c491491af0408934ec81d004035c0a02ef3e54395e3bf27
     networks:
-      - targets
+      - internal
     healthcheck:
       test:
         - CMD
@@ -35,6 +37,46 @@ services:
       start_period: 45s
     restart: unless-stopped
 
+  engine:
+    build:
+      context: ./engine
+      dockerfile: Dockerfile
+    container_name: mitigata-engine
+    ports:
+      - "8000:8000"
+    networks:
+      - internal
+      - public
+    environment:
+      TARGETS_ROOT: /targets
+      TARGET_PROFILE: ${TARGET_PROFILE:-flask_demo}
+    volumes:
+      - ./targets:/targets:ro
+      - ./configs:/app/configs:ro
+      - ./data:/app/data
+    env_file:
+      - .env
+    depends_on:
+      target-flask:
+        condition: service_healthy
+      target-juice-shop:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: mitigata-frontend
+    ports:
+      - "3000:3000"
+    networks:
+      - public
+    depends_on:
+      - engine
+    restart: unless-stopped
+
 networks:
-  targets:
+  internal:
     internal: true
+  public:

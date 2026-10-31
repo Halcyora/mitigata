@@ -1,0 +1,9 @@
+{
+  "name": "mitigata-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "echo 'Frontend scaffold ready for React app setup'",
+    "build": "echo 'No build configured yet'"
+  }
+}
