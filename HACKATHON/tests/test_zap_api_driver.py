@@ -123,9 +123,10 @@ def test_execute_runs_targeted_tasks_before_broad_and_limits_context(monkeypatch
                 return {
                     "scanners": [
                         {
-                            "id": "40018",
+                            "id": scanner_id,
                             "allDependenciesAvailable": "true",
                         }
+                        for scanner_id in ("6", "90020", "40012", "40014", "40018", "20019")
                     ]
                 }
             if (component, operation, name) == ("ascan", "action", "scan"):
@@ -228,7 +229,15 @@ def test_task_timeout_does_not_prevent_broad_phase(monkeypatch):
             if (component, operation, name) == ("context", "action", "newContext"):
                 return {"contextId": "1"}
             if (component, operation, name) == ("ascan", "view", "scanners"):
-                return {"scanners": []}
+                return {
+                    "scanners": [
+                        {
+                            "id": scanner_id,
+                            "allDependenciesAvailable": "true",
+                        }
+                        for scanner_id in ("6", "90020", "40012", "40014", "40018", "20019")
+                    ]
+                }
             if (component, operation, name) == ("ascan", "action", "scan"):
                 scan_count += 1
                 return {"scan": str(scan_count)}

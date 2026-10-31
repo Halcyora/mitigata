@@ -34,7 +34,7 @@ def correlate_and_merge(
                     continue
                 if not route.matches_path(path):
                     continue
-                if dast_finding.method and not route.matches_method(dast_finding.method):
+                if not dast_finding.method or not route.matches_method(dast_finding.method):
                     continue
                 if not route.contains_location(sast_finding.file, sast_finding.line):
                     continue

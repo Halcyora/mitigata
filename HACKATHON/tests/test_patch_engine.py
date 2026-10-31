@@ -69,6 +69,8 @@ def test_templates_cover_supported_sinks_and_cwe_aliases():
         "weak_hash",
         "jwt_weak_secret",
         "ssti",
+        "eval_injection",
+        "insecure_deserialisation",
     }
     assert get_template_patch("sql_injection") == PATCH_TEMPLATES["sql_injection"]
     assert get_template_patch("unknown") is None

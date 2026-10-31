@@ -226,6 +226,16 @@ class GraphCodeBERTShadowRanker:
         self.source_revision = source_revision
         self.source_root = source_root
 
+    @property
+    def is_available(self) -> bool:
+        """Report whether the inference dependencies are installed locally."""
+        try:
+            import torch  # noqa: F401
+            from transformers import AutoModel, AutoTokenizer  # noqa: F401
+        except (ImportError, OSError, RuntimeError):
+            return False
+        return True
+
     def _query(self, finding: UnifiedFinding, route: RouteNode) -> str:
         parameters = ", ".join(
             f"{parameter.source} parameter {parameter.name}"
@@ -251,6 +261,11 @@ class GraphCodeBERTShadowRanker:
             return self._unavailable(
                 assessment_id, scan_id, finding, route_id, refs,
                 "MODEL_DISABLED", "SKIPPED", self.mode, self.source_revision,
+            )
+        if not self.is_available:
+            return self._unavailable(
+                assessment_id, scan_id, finding, route_id, refs,
+                "TRANSFORMERS_UNAVAILABLE", "SKIPPED", self.mode, self.source_revision,
             )
         if not code:
             return self._unavailable(

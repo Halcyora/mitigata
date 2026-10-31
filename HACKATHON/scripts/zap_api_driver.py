@@ -16,9 +16,10 @@ API_WAIT_SECONDS = 60
 API_TIMEOUT_SECONDS = 10
 TASK_TIMEOUT_SECONDS = 30
 TARGETED_TASK_TIMEOUT_SECONDS = 15
-BROAD_TASK_TIMEOUT_SECONDS = 5
+BROAD_TASK_TIMEOUT_SECONDS = 15
 POLL_INTERVAL_SECONDS = 2
 FINALIZATION_RESERVE_SECONDS = 15
+BROAD_SCANNER_IDS = {"6", "90020", "40012", "40014", "40018", "20019"}
 _FLASK_PATH_PARAMETER = re.compile(r"<(?:[A-Za-z_][A-Za-z0-9_]*:)?([A-Za-z_][A-Za-z0-9_]*)>")
 _EXPRESS_PATH_PARAMETER = re.compile(r":([A-Za-z_][A-Za-z0-9_]*)")
 
@@ -279,14 +280,18 @@ def _apply_policy(
                 scanPolicyName=policy_name,
             )
     else:
-        client.request("ascan", "action", "enableAllScanners", scanPolicyName=policy_name)
-        excluded = set(task.get("excluded_zap_rule_ids", [])) & available_scanners
-        if excluded:
+        selected = BROAD_SCANNER_IDS - set(task.get("excluded_zap_rule_ids", []))
+        missing = selected - available_scanners
+        if missing:
+            raise ZapApiError(
+                f"Broad ZAP scanner IDs are not installed: {', '.join(sorted(missing))}"
+            )
+        if selected:
             client.request(
                 "ascan",
                 "action",
-                "disableScanners",
-                ids=",".join(sorted(excluded)),
+                "enableScanners",
+                ids=",".join(sorted(selected)),
                 scanPolicyName=policy_name,
             )
 

@@ -16,7 +16,7 @@ docker compose up --build
 ```
 
 Compose builds and starts the Flask reference app and OWASP Juice Shop. The
-targets bind only to dynamically assigned host loopback ports. Scanner images are
+targets bind only to host loopback ports 5050 and 3002 by default. Scanner images are
 configured as on-demand Compose services: Semgrep can read target source but
 cannot reach the target network; ZAP can reach only the isolated target
 network. Do not expose these intentionally vulnerable target containers to
@@ -35,7 +35,7 @@ It does not build the engine image.
 From this directory in PowerShell, prepare the Python environment once:
 
 ```powershell
-py -3.11 -m venv .venv
+py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
@@ -91,9 +91,10 @@ for Semgrep and keeps certificate verification enabled. For DAST, the AST route
 inventory is joined to normalized Semgrep findings by target-relative file and
 line scope. Explainable priority tiers schedule mapped route/method/CWE rule
 tasks first; ZAP enables only the mapped scanners for those tasks, then tests
-the route inventory with remaining supported scanners. Each route is seeded
-directly into ZAP's site tree and active-scanned within the exact selected-target
-context; per-task timeouts leave budget for later routes.
+the route inventory with the same six verified security scanners used by the
+initial rule map. Each route is seeded directly into ZAP's site tree and
+active-scanned within the exact selected-target context; per-task timeouts leave
+budget for later routes.
 
 The initial rule map covers CWE-22, CWE-78, CWE-79, CWE-89, and CWE-601 using
 scanner IDs verified in the pinned ZAP image. Unsupported input bindings (JSON
@@ -114,8 +115,8 @@ def/use links. These links approximate data flow and are not a taint analysis.
 Scores are uncalibrated and are not vulnerability
 probabilities. The five-minute DAST clock begins after the selected target is
 healthy and the scan plan is ready; it includes ZAP startup, route tests, alert
-collection, and cleanup. Targeted tasks are capped at 15 seconds; broad fallback
-tasks at 5 seconds. Semgrep and planning time are listed separately from
+collection, and cleanup. Targeted and broad route tasks are capped at 15
+seconds. Semgrep and planning time are listed separately from
 ZAP execution time. The engine image preloads model weights during its build;
 the local Python CLI downloads the same pinned weights on first use if they are
 not already in the Hugging Face cache, before starting the DAST clock.
