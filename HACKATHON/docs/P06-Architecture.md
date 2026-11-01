@@ -1,222 +1,194 @@
-# P06 Architecture — SAST & DAST Correlation Engine
-## Complete System Design with Mermaid Diagrams
+# P06 Architecture — Mitigata SAST/DAST Correlation Engine
 
-> **Status:** Updated to the current repo implementation and host/container execution model in `engine/README.md` and the checked-in Docker compose files.
-> **Mitigata Hackathon — Problem 06 · Flagship**  
-> Three Objectives: Scan Code+App · Correlate+Merge · Prioritise  
-> Real Incident: INC-06 — 2017 Credit Bureau Breach (~145M records)  
-> PRD: [P06-PRD.md](P06-PRD.md) — source of truth  
-> Architecture version: 1.5 — route-aware planner, target-scoped DAST, bounded verification, and advisory GraphCodeBERT ranking
+> **Status:** Current — reflects the implemented repo state as of the latest commit.
+> **Version:** 2.0 — route-aware DAST planner, advisory GraphCodeBERT ranking, bounded verification workflow, scan manager, deduplication, incremental correlation, SARIF export, scan comparison
+> **References:** [P06-PRD.md](P06-PRD.md) · [P06-SAST-DAST-Correlation-Engine.md](P06-SAST-DAST-Correlation-Engine.md) · [P06-Build-Plan.md](P06-Build-Plan.md)
 
 ---
 
 ## Table of Contents
 
 1. [System Overview](#1-system-overview)
-2. [Container Architecture](#2-container-architecture)
-3. [End-to-End Data Flow](#3-end-to-end-data-flow)
+2. [Container Topology](#2-container-topology)
+3. [Data Flow Diagrams](#3-data-flow-diagrams)
 4. [Component Deep-Dives](#4-component-deep-dives)
-   - 4.1 [Ingestion Pipeline — FR-1, FR-2, FR-3](#41-ingestion-pipeline--fr-1-fr-2-fr-3)
-   - 4.2 [Three-Pass AST Route Mapper — FR-4](#42-three-pass-ast-route-mapper--fr-4)
-   - 4.3 [Correlation & Merge Engine — FR-5, FR-6](#43-correlation--merge-engine--fr-5-fr-6)
-   - 4.4 [Runtime Verification Loop — B-1](#44-runtime-verification-loop--b-1)
-   - 4.5 [3-Label Classifier — FR-7, FR-9](#45-3-label-classifier--fr-7-fr-9)
-   - 4.6 [Patch Engine — B-4](#46-patch-engine--b-4)
-   - 4.7 [Compliance Translator](#47-compliance-translator)
-   - 4.8 [FastAPI Engine Layer — FR-10](#48-fastapi-engine-layer--fr-10)
-   - 4.9 [React Frontend — FR-8, FR-9](#49-react-frontend--fr-8-fr-9)
 5. [Network Topology](#5-network-topology)
 6. [Data Schemas](#6-data-schemas)
 7. [API Contract](#7-api-contract)
-8. [Answer Key Mapping](#8-answer-key-mapping)
-9. [Performance Budget](#9-performance-budget)
-10. [Dependency Graph](#10-dependency-graph)
+8. [Performance Budget](#8-performance-budget)
+9. [Dependency Graph](#9-dependency-graph)
 
 ---
 
 ## 1. System Overview
 
-```mermaid
-flowchart TD
-    subgraph OBJ1["🎯 Objective 01 — Scan Code + App (FR-1, FR-2, FR-3)"]
-        SAST["Semgrep SAST\nCWE-89 ✅ CWE-79 ✅\nCWE-78 · CWE-798\nCWE-22 · CWE-601"]
-        DAST["OWASP ZAP DAST\nCWE-89 ✅ CWE-79 ✅\nCWE-78 · CWE-601\nRuntime only findings"]
-        UF["UnifiedFinding[]\none common format\ncwe_id mandatory"]
-        SAST --> UF
-        DAST --> UF
-    end
-
-    subgraph OBJ2["🎯 Objective 02 — Correlate + Merge (FR-4, FR-5, FR-6)"]
-        AST["Three-Pass AST Route Mapper\nPass 1: routes + prefixes + normalized URL\nPass 2: one-hop helper scopes\nPass 3: request parameter reads\nFlask Python + Express JavaScript adapters"]
-        PLAN["DAST Planner + Mandatory GraphCodeBERT\nroute/rule prioritisation\nreason codes + scan tasks"]
-        CORR["Correlation & Merge Engine\nFR-5: target + CWE + route + scope + parameter\nmethod/source checked when available\nFR-6: deduplicate each pair once"]
-        LG["Bounded Runtime Verification\nB-1: Code only → Confirmed\nplain Python probe workflow\ninternal Docker network"]
-        UF --> AST
-        AST --> PLAN
-        PLAN --> CORR
-        CORR --> LG
-    end
-
-    subgraph OBJ3["🎯 Objective 03 — Prioritise (FR-7, FR-8, FR-9)"]
-        CLS["3-Label Classifier\nConfirmed 🔴 Rank 1\nCode only 🟡 Rank 2\nRuntime only 🟠 Rank 3"]
-        PATCH["Patch Engine B-4\nSarvam GLM-5.3 → template\ngit diff + re-verify"]
-        COMP["Compliance Translator\nINR exposure · RBI · SEBI\nISO 27001 · DPDP 2023\nINC-06 reference"]
-        LG --> CLS
-        CLS --> PATCH
-        CLS --> COMP
-    end
-
-    subgraph UI["🖥️ Correlation Workbench (FR-8, FR-9, FR-10)"]
-        GRAPH["Attack Path Graph\nReact Flow + ELK\nConfirmed nodes first"]
-        DETAIL["Finding Detail Panel\nURL + param + payload\nfile + line + CWE\ncode snippet"]
-        RISK["Business Risk Panel\n₹ exposure · 4 frameworks\ncyber insurance flag"]
-        CLS --> GRAPH
-        PATCH --> DETAIL
-        COMP --> RISK
-    end
-
-    style OBJ1 fill:#1e3a5f,color:#fff
-    style OBJ2 fill:#1e4a3f,color:#fff
-    style OBJ3 fill:#3a1e4a,color:#fff
-    style UI fill:#3a3a1e,color:#fff
 ```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                         Mitigata Pipeline                                    │
+│                                                                              │
+│  Semgrep (SAST)  ──►  UnifiedFinding[]  ──►  Three-pass AST Route Mapper    │
+│  OWASP ZAP (DAST)──►  UnifiedFinding[]  ──►  Deduplication                  │
+│                                         ──►  Correlation Gate                │
+│                                               (target + CWE + route +        │
+│                                                scope + parameter)            │
+│                                         ──►  Classifier                      │
+│                                               Confirmed / Code only /        │
+│                                               Runtime only                   │
+│                                         ──►  React UI (Correlation           │
+│                                               Workbench)                     │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Three mandatory objectives:**
+
+| Objective | Key Deliverable | Scoring Weight |
+|---|---|---|
+| 01 — Scan Code & App | `UnifiedFinding` with `cwe_id` covering ≥ 4 CWE types | 30 pts (shared) |
+| 02 — Correlate & Merge | Three-pass route mapper + strict correlation gate | 30 pts (shared) |
+| 03 — Prioritise | Confirmed first in every view; ≥ 70% noise suppression | 20 pts (shared) |
 
 ---
 
-## 2. Container Architecture
+## 2. Container Topology
 
 ```mermaid
 graph TB
-    subgraph HOST["🖥️ Host Machine"]
-        BROWSER["Browser :3000"]
-        CURL["curl :8000"]
-        BLOCKED["curl :5050 ❌ BLOCKED"]
+    subgraph HOST["Host Machine"]
+        B["Browser :3000"]
+        API_CLIENT["curl / CI :8000"]
     end
 
-    subgraph PUBLIC["Docker Network: public"]
-        FE["mitigata-frontend\nReact + Vite\n:3000"]
-        ENG["mitigata-engine\nFastAPI Python\n:8000\n/api/graph\n/api/verify\n/api/patch\n/api/compliance"]
+    subgraph PUB["Docker Network: public"]
+        FE["mitigata-frontend\n:3000\nReact + Vite"]
+        ENG["mitigata-engine\n:8000\nFastAPI + uvicorn"]
     end
 
-    subgraph INTERNAL["Docker Network: internal (internal: true)"]
-        TARGET["mitigata-flask-target\nwe45/Vulnerable-Flask-App\ninternal only"]
-        JUICE["mitigata-juice-shop\nOWASP Juice Shop · Express/Node.js\ninternal only"]
+    subgraph INT["Docker Network: internal (internal: true)"]
+        FLASK["mitigata-target-flask\n:5050\nwe45 Vulnerable Flask App"]
+        JUICE["mitigata-target-juice-shop\n:3001→3000\nOWASP Juice Shop · Express"]
     end
 
-    subgraph VOLUMES["Volumes"]
-        SRC["Selected profile source → /target-src :ro\nadapter reads source matching running target"]
-        DATA["./data → /app/data\npre-seeded scan results"]
-    end
-
-    BROWSER --> FE
-    CURL --> ENG
-    BLOCKED -. "blocked" .-> TARGET
-    BLOCKED -. "blocked" .-> JUICE
+    B --> FE
+    API_CLIENT --> ENG
     FE <--> ENG
-    ENG -->|"selected profile only"| TARGET
-    ENG -->|"selected profile only"| JUICE
-    ENG --- SRC
-    ENG --- DATA
+    ENG -->|"profile-selected probes\ninternal network only"| FLASK
+    ENG -->|"profile-selected probes\ninternal network only"| JUICE
 
-    style INTERNAL fill:#2d1515,color:#fff
-    style PUBLIC fill:#152d15,color:#fff
-    style HOST fill:#15152d,color:#fff
-    style VOLUMES fill:#2d2d15,color:#fff
+    style INT fill:#1a0a0a,color:#fff
 ```
 
-> **Security invariant:** `mitigata-target` is reachable **only** from `mitigata-engine` via the internal Docker network. All runtime verifier probes route through the engine. No external traffic ever leaves the Docker network.
+**Volume mounts (engine container):**
+
+```yaml
+volumes:
+  - ./targets:/targets:ro        # read-only source for both adapters
+  - ./configs:/app/configs:ro    # target profiles
+  - ./data:/app/data             # raw scan output + verification results
+```
 
 ---
 
-## 3. End-to-End Data Flow
+## 3. Data Flow Diagrams
 
-### 3.1 Full Pipeline — Startup to Classified Findings
+### 3.1 Main Pipeline — GET /api/graph
 
 ```mermaid
 sequenceDiagram
-    participant DC as docker compose up
-    participant T as Selected target profile
-    participant E as mitigata-engine :8000
-    participant FE as mitigata-frontend :3000
     participant B as Browser
-
-    DC->>T: start Flask and Juice Shop containers
-    T-->>DC: healthcheck passes
-    DC->>E: start container (depends_on target healthy)
-    E->>E: load data/semgrep-results.json (FR-1)
-    E->>E: load data/zap-alerts.json (FR-2)
-    E->>E: load selected target profile + matching source mount
-    DC->>FE: start container
-    FE-->>DC: ready :3000
+    participant FE as Frontend :3000
+    participant E as Engine :8000
+    participant DC as Docker (internal)
 
     B->>FE: GET http://localhost:3000
     FE->>E: GET /api/graph?target_id=flask_demo|juice_shop
-    E->>E: semgrep_parser → UnifiedFinding[] (FR-3)
-    E->>E: zap_parser → UnifiedFinding[] (FR-3)
+
+    Note over E: Ingestion (FR-1, FR-2, FR-3)
+    E->>E: semgrep_parser → UnifiedFinding[] (sast, label=Code only)
+    E->>E: zap_parser → UnifiedFinding[] (dast, label=Runtime only)
+    E->>E: deduplicate_findings (SAST by target/CWE/location; DAST by target/CWE/rule/surface)
+
+    Note over E: Three-Pass AST Route Mapper (FR-4)
     E->>E: select Flask or Express adapter by target profile
-    E->>E: Pass 1: routes + mounts/prefixes → normalized RouteNode[]
-    E->>E: Pass 2: handlers + directly called helper scopes
-    E->>E: Pass 3: request parameter reads (path/query/body/header)
-    E->>E: build route/finding candidate map + deterministic reason codes
-    E->>E: advisory GraphCodeBERT routing ranker enriches ambiguous candidates when enabled
-    E->>E: DAST planner creates targeted ScanPlan + ScanTask queue
-    E->>E: ZAP executes targeted tests first, then broad coverage within budget
-    E->>E: map SAST locations into RouteNode code scopes
-    E->>E: correlate: target + CWE + route + scope + parameter (+ method/source)
-    E->>E: classifier → Confirmed/Code only/Runtime only (FR-7)
-    E->>E: ELK layout → node positions
+    E->>E: Pass 1: decorators/mounts → normalized RouteNode[]
+    E->>E: Pass 2: handler + one-hop helper scopes → CodeScope[]
+    E->>E: Pass 3: request parameter reads → ParameterRead[]
+
+    Note over E: DAST Planning
+    E->>E: build_scan_plan → ScanPlan (targeted + broad ScanTask queue)
+    E->>E: advisory GraphCodeBERT ranking (GRAPHCODEBERT_MODE=ON only)
+
+    Note over E: Correlation (FR-5, FR-6)
+    E->>E: enrich_findings_with_ast (reachability)
+    E->>E: correlate_and_merge: target+CWE+route+scope+parameter → Confirmed
+    E->>E: apply persisted verification results
+    E->>E: sort_findings: Confirmed → Corroborated → Code only → Runtime only
+
+    Note over E: Graph Build
+    E->>E: ELK seed positions → GraphNode[] + GraphEdge[]
+    E->>E: GraphStats: total, confirmed, code_only, runtime_only, suppression_ratio
     E-->>FE: GraphResponse {nodes, edges, stats}
-    FE-->>B: Correlation Workbench rendered ≤3s (FR-9)
+    FE-->>B: Correlation Workbench rendered ≤ 3 s
 ```
 
-### 3.2 Live Verification Flow — B-1 (Code only → Confirmed)
+### 3.2 Live Verification Flow — SSE Stream
 
 ```mermaid
 sequenceDiagram
     participant U as User
     participant FE as Frontend
     participant E as Engine
-    participant LG as runtime verifier
-    participant T as Target :5050
+    participant V as Verification Workflow
+    participant T as Target (internal)
 
     U->>FE: click "Verify" on Code only finding
-    FE->>E: POST /api/verify/{finding_id}
-    E->>LG: invoke iter_verification_states(AlertState)
+    FE->>E: GET /api/verify/{finding_id}/stream?target_id=...
+    E->>E: _verification_candidates: derive up to 4 route/method/param probes from AST
 
-    Note over LG: probe_generator node
-    LG->>LG: select payload by sink_type + variant=0
-    Note right of LG: ssti → "{{7*7}}"
+    loop for each candidate (up to 4)
+        E->>V: iter_verification_states(AlertState)
 
-    Note over LG: runtime_executor node
-    LG->>T: httpx.request(POST /nonexistent, timeout=2.0s)
-    T-->>LG: HTTP 404, body contains "49"
+        Note over V: probe_generator
+        V->>V: select canary payload by sink_type + variant
+        Note right of V: ssti → "{{7*7}}", sql → "'", xss → "<svg ...>"
 
-    Note over LG: response_evaluator node
-    LG->>LG: check EVIDENCE_SIGNALS["ssti"] = ["49","Jinja2"]
-    LG->>LG: "49" found → label = "Confirmed"
+        Note over V: runtime_executor
+        V->>T: httpx.request(method, url, timeout=2.0s)
+        T-->>V: HTTP response (capped at 500 bytes)
 
-    LG-->>E: AlertState{label="Confirmed", evidence="['49']"}
-    E-->>FE: SSE event {label:"Confirmed", done:true}
-    FE-->>U: badge flips 🟡 Code only → 🔴 Confirmed (live)
-    FE-->>U: finding re-sorted to Rank 1 position
+        Note over V: response_evaluator
+        V->>V: check EVIDENCE_SIGNALS[sink_type]
+        V->>V: ssti: "49" (exact, no template echo) / xss: "<svg" / sql: "operationalerror"
+
+        alt Evidence found
+            V-->>E: label = "Confirmed"
+            E->>E: save_confirmed_result → data/raw/<target>-verification.json
+            E-->>FE: SSE {label:"Confirmed", evidence, done:true}
+            FE-->>U: badge flips 🟡 → 🔴 live
+        else No evidence, variant == 0
+            Note over V: retry_evaluator → variant = 1
+            V->>V: loop with alternate payload
+        else No evidence, variant == 1
+            E-->>FE: SSE {label:"Code only", done:true}
+        end
+    end
 ```
 
 ### 3.3 Conditional Retry Flow
 
 ```mermaid
 flowchart TD
-    START(["Code only finding"]) --> PG["probe_generator<br/>variant = 0<br/>payload: {{7*7}}"]
-    PG --> RE["runtime_executor<br/>httpx timeout = 2.0s"]
-    RE --> EV["response_evaluator<br/>check EVIDENCE_SIGNALS"]
+    START(["Code only finding"]) --> PG["probe_generator\nvariant=0\npayload: {{7*7}}"]
+    PG --> RE["runtime_executor\nhttpx timeout=2.0s\nno redirects, no env proxy"]
+    RE --> EV["response_evaluator\ncheck EVIDENCE_SIGNALS"]
 
     EV --> DEC{"Evidence found?"}
-    DEC -->|Yes| CONFIRMED(["Confirmed<br/>label updated<br/>SSE to UI"])
-    DEC -->|No, variant = 0| RETRY["retry_evaluator<br/>variant = 1"]
-    DEC -->|No, variant = 1| CODEONLY(["Code only<br/>probe inconclusive"])
+    DEC -->|Yes| CONFIRMED(["Confirmed\nlabel updated\nSSE to UI"])
+    DEC -->|"No, variant=0\nno non-retryable error"| RETRY["retry_evaluator\nvariant = 1"]
+    DEC -->|"No, variant=1\nor non-retryable error"| CODEONLY(["Code only\nprobe inconclusive"])
 
-    RETRY --> PG2["probe_generator<br/>variant = 1<br/>alternate canary"]
-    PG2 --> RE2["runtime_executor<br/>second attempt"]
-    RE2 --> EV2["response_evaluator<br/>check evidence"]
+    RETRY --> PG2["probe_generator\nvariant=1\nalternate canary"]
+    PG2 --> RE2["runtime_executor"]
+    RE2 --> EV2["response_evaluator"]
     EV2 -->|Evidence| CONFIRMED
     EV2 -->|No evidence| CODEONLY
 
@@ -224,25 +196,25 @@ flowchart TD
     style CODEONLY fill:#ca8a04,color:#fff
 ```
 
-### 3.4 Auto-Remediation Flow — B-4
+### 3.4 Auto-Remediation Flow
 
 ```mermaid
 flowchart LR
-    SEL([User selects\nConfirmed finding]) --> CTX[Read code context\n/target-src line±5]
-    CTX --> SARVAM{Sarvam GLM-5.3\navailable?}
-    SARVAM -->|Yes| LLM[GLM-5.3 generates\nunified diff\ntemp=0 · 10s timeout]
-    SARVAM -->|No| TPL[Template patch\nfrom PATCH_TEMPLATES\nzero cost · always works]
+    SEL([User selects\nConfirmed finding]) --> CTX["Read ±40 lines source context\naround sink line"]
+    CTX --> SARVAM{"SARVAM_API_KEY\nconfigured?"}
+    SARVAM -->|Yes| LLM["Sarvam GLM-5.3\nunified diff\ntemp=0, 10s timeout"]
+    SARVAM -->|No| TPL["Deterministic template\nfrom PATCH_TEMPLATES\nzero cost, always works"]
 
-    LLM --> VALID{Starts with\n--- or @@?}
-    VALID -->|Yes| DIFF[Show Git diff\npreview in UI]
+    LLM --> VALID{"Valid unified diff?\nstarts with --- or @@\nbounded single-file"}
+    VALID -->|Yes| DIFF["Show Git diff preview in UI\nstored in _PATCH_PREVIEWS"]
     VALID -->|No| TPL
     TPL --> DIFF
 
-    DIFF --> APPLY[User clicks Apply\ngit apply --check\ngit apply]
-    APPLY --> REVERIFY[Re-run same\nruntime verifier probe]
-    REVERIFY --> RESULT{Probe\nblocked?}
-    RESULT -->|Yes| FIXED([✅ Fix Verified\nVulnerability Closed])
-    RESULT -->|No| INSUFF([❌ Fix Insufficient\nRe-patch Required])
+    DIFF --> APPLY["User clicks Apply\napply_unified_diff()\nvalidate a/ b/ paths"]
+    APPLY --> REVERIFY["Re-run same canary probe\nclear verification store\nclear graph cache"]
+    REVERIFY --> RESULT{"Probe blocked?"}
+    RESULT -->|Yes| FIXED(["✅ Fix Verified\nVulnerability Closed"])
+    RESULT -->|No| INSUFF(["❌ Fix Insufficient\nRe-patch Required"])
 
     style FIXED fill:#16a34a,color:#fff
     style INSUFF fill:#dc2626,color:#fff
@@ -257,177 +229,221 @@ flowchart LR
 ```mermaid
 flowchart LR
     subgraph SAST_IN["FR-1: SAST Input"]
-        SJ["data/semgrep-results.json\ncheck_id · path · line\nmetadata.cwe · severity"]
+        SJ["data/raw/<target>-semgrep.json\nor data/sample/<target>_semgrep.json\ncheck_id · path · line · metadata.cwe · severity"]
     end
 
     subgraph DAST_IN["FR-2: DAST Input"]
-        ZJ["data/zap-alerts.json\ncweid · url · method\nparam · evidence · riskdesc"]
+        ZJ["data/raw/<target>-zap.json\nor data/sample/<target>_zap.json\ncweid · url · method · param · evidence · riskdesc"]
     end
 
     subgraph PARSE["FR-3: Normalise to Common Format"]
-        SP["semgrep_parser.py\nextract CWE from metadata\nmap rule_id → CWE\nlabel = Code only"]
-        ZP["zap_parser.py\nnormalise cweid → CWE-N\nnormalise riskdesc → severity\nlabel = Runtime only"]
+        SP["semgrep_parser.py\nextract CWE from metadata\nmap check_id → CWE fallback\nlabel = Code only"]
+        ZP["zap_parser.py\nnormalise cweid → CWE-N\nnormalise riskdesc → severity\nlabel = Runtime only\ntarget-wide CORS/CSP collapse"]
+        DEDUP["deduplicate_findings\nSAST: target/CWE/file/line\nDAST: target/CWE/rule/path/method/param\nretains merged_from + evidence_items"]
     end
 
     subgraph OUT["UnifiedFinding (common format)"]
-        UF["id · source · cwe_id ← shared key\nlabel · file · line · function\nurl · method · parameter\nevidence · severity · merged_from"]
+        UF["id (stable uuid5 fingerprint)\ntarget_id · source · cwe_id\nlabel · file · line · function · sink_type\nurl · method · route · parameter\nevidence · evidence_items · payload\nseverity · reachable · routes\nmerged_from · reason · confidence"]
     end
 
-    subgraph COV["Objective 01 Coverage Check"]
-        CHECK["CWE-89 SQLi ✅ mandatory\nCWE-79 XSS ✅ mandatory\nCWE-78 CMDi\nCWE-22 Path Traversal\nCWE-601 Open Redirect\nCWE-798 Hardcoded Secrets\n≥ 4 of 6 required"]
-    end
-
-    SJ --> SP --> UF
-    ZJ --> ZP --> UF
-    UF --> CHECK
+    SJ --> SP --> DEDUP
+    ZJ --> ZP --> DEDUP
+    DEDUP --> UF
 ```
+
+**Stable finding IDs:** `graph.py` derives each finding's ID as `uuid5(NAMESPACE_URL, fingerprint)` from `target_id + source + index + rule_id + cwe_id + file + line + url + method + parameter`. This makes IDs stable across API calls so the UI can safely use them for detail selection and verification.
+
+**Parameterised query suppression (B-2):** `_has_bound_sql_parameters` inspects the Python AST at the reported line. Only a `cursor.execute()` call with a static string query, a recognised bind marker (`?`, `%s`, `:name`, `$N`), and an explicit second argument (tuple/list/dict/name) is suppressed. Unknown or dynamic query construction remains reportable.
 
 ### 4.2 Three-Pass AST Route Mapper — FR-4
 
-FR-4 is a **must-have** requirement: *"read the source code to list which URL is handled by which function and lines"*. A profile selects either the Flask/Python adapter or Express/JavaScript adapter; both emit the same `RouteNode` contract. Route identity, source scope, and observed request keys are collected separately so a matching line range alone cannot establish correlation. Every route and finding carries `target_id`, preventing evidence from separate applications from joining.
-
 ```mermaid
 flowchart TD
-    SRC["Read-only target source"]
+    SRC["Read-only target source\n(volume mount)"]
 
     subgraph P1["Pass 1: Route and prefix mapping"]
-        PARSE["Parse target modules\nPython ast or Node.js TypeScript Compiler API"]
-        DECL["Extract Flask decorators/Blueprints\nor Express routes/router.route()"]
-        PREFIX["Resolve Flask url_prefix\nor static Express app.use() mounts"]
-        NORMAL["Join prefix and route; normalize dynamic segments"]
-        R1["Route identity: normalized URL + method + handler"]
-        PARSE --> DECL --> PREFIX --> NORMAL --> R1
+        PARSE1["Parse target modules\nPython ast module or\nNode.js TypeScript Compiler API"]
+        DECL["Extract Flask @app.route / @bp.route / Blueprint\nor Express app.get/post, router.route(), router.get/post"]
+        PREFIX["Resolve Flask url_prefix mounts\nor static Express app.use(prefix, router)"]
+        NORMAL["Join prefix + route path\nNormalize: <int:id> and :id → {param}\nPreserve original path for diagnostics"]
+        R1["RouteNode identity:\nnormalized_url + methods + handler\ntarget_id + resolved flag"]
     end
 
     subgraph P2["Pass 2: One-hop callee scopes"]
-        HANDLER["Resolve route handler"]
-        CALLEE["Resolve directly called local/imported project helpers"]
-        SCOPES["CodeScope[]: file + start/end lines + function"]
-        HANDLER --> CALLEE --> SCOPES
+        HANDLER["Resolve route handler function"]
+        CALLEE["Resolve directly called local/imported\nproject helpers (one hop only in v1)"]
+        SCOPES["CodeScope[]: target-relative file\nstart_line + end_line + function"]
     end
 
     subgraph P3["Pass 3: Request parameter reads"]
-        READ["Inspect handler and one-hop helper ASTs"]
-        PARAMS["ParameterRead[]: name + source\npath / query / form / json / header"]
-        READ --> PARAMS
+        READ["Inspect handler + one-hop helper ASTs"]
+        PARAMS["ParameterRead[]: name + source\nFlask: request.args/form/json/headers/view_args\nExpress: req.params/query/body/headers"]
     end
 
-    NODE["Unified RouteNode\ntarget_id + normalized_url + methods + handler\nscopes[] + input_parameters[]"]
-    SAST["SAST finding\nfile + line + CWE"]
-    SCOPE_MATCH{"SAST location inside\none of the route scopes?"}
-    OUT["Route evidence for correlation\nexact source location + parameter reads"]
-    UNMATCHED["Unresolved or out-of-scope\nnot treated as a route match"]
+    NODE["Unified RouteNode\ntarget_id · raw_url · normalized_url\nmethods · handler · resolved\nscopes[] · input_parameters[]"]
 
-    SRC --> PARSE
+    SRC --> PARSE1
+    PARSE1 --> DECL --> PREFIX --> NORMAL --> R1
     R1 --> NODE
-    SCOPES --> NODE
-    PARAMS --> NODE
-    NODE --> SCOPE_MATCH
-    SAST --> SCOPE_MATCH
-    SCOPE_MATCH -->|Yes| OUT
-    SCOPE_MATCH -->|No| UNMATCHED
+    HANDLER --> CALLEE --> SCOPES --> NODE
+    READ --> PARAMS --> NODE
 ```
 
-**Example RouteNode after all passes:** A Flask Blueprint mounted at `/api`,
-with `@bp.route("/orders/<int:id>")`, resolves to `/api/orders/{param}`. An
-Express router mounted with a static `app.use("/api", router)` prefix and a
-`router.get("/orders/:id", ...)` declaration resolves to the same template.
-Each adapter records its target ID, statically named request reads (such as
-`request.args.get("q")` or `req.query.q`), and handler/direct-helper code scopes.
-Pass 2 is intentionally one hop in v1; transitive call chains are not claimed
-as resolved. Dynamic or unresolved mount paths stay explicitly unresolved.
+**Key constraints:**
+- Pass 2 resolves only **direct** local/imported callees — no transitive chains claimed
+- Dynamic/unresolved mount paths remain `resolved=False` and cannot match DAST traffic
+- Unresolved request keys (e.g. `request.args.get(some_var)`) are not recorded as `ParameterRead`
+- Header parameter names are compared case-insensitively; all other parameter names are case-sensitive
 
 ### 4.3 Correlation & Merge Engine — FR-5, FR-6
 
 ```mermaid
 flowchart TD
-    SAST["SAST finding\nCWE + file + line"]
-    DAST["DAST finding\nCWE + URL + method + attacked parameter"]
-    ROUTES["Three-pass RouteNode[]\nnormalized URL + methods\ncode scopes + observed parameter reads"]
+    SAST["SAST findings\ntarget_id + CWE + file + line"]
+    DAST["DAST findings\ntarget_id + CWE + URL + method + parameter"]
+    ROUTES["RouteNode[]\nnormalized URL + methods\nCodeScope[] + ParameterRead[]"]
 
-    PATH["Parse DAST URL path"]
-    MATCH{"All required evidence matches?\ntarget_id + CWE + normalized route\nmethod/source when available\nSAST file:line in scope + read parameter"}
-    CONFIRMED["Confirmed\nmerge SAST + DAST evidence\nmerged_from = both source IDs"]
-    CODE["Code only\nSAST unmatched by strict gate\npreserve AST reachability metadata"]
-    RUNTIME["Runtime only\nDAST unmatched by strict gate"]
-    DEDUP["Track consumed DAST IDs\nat most one confirmed pair per DAST"]
-    SORT["Sort: Confirmed first,\nthen Code only, then Runtime only"]
-    LEFT["Filter DAST IDs not consumed by a confirmed pair"]
+    DEDUP_PRE["deduplicate_findings\nbefore correlation"]
+    ENRICH["enrich_findings_with_ast\nset reachable flag on SAST findings"]
 
-    SAST --> MATCH
-    DAST --> PATH --> MATCH
-    ROUTES --> MATCH
-    MATCH -->|Yes| CONFIRMED --> DEDUP --> SORT
-    MATCH -->|No| CODE --> SORT
-    DAST --> LEFT
-    DEDUP --> LEFT
-    LEFT --> RUNTIME --> SORT
+    CANDIDATE{"For each SAST/DAST pair:\nsame target_id AND same CWE?"}
+    ROUTE_MATCH{"Normalized DAST path\nmatches RouteNode?\nMethod matches when known?"}
+    SCOPE_MATCH{"SAST file:line inside\nhandler or one-hop helper scope?"}
+    PARAM_MATCH{"DAST attacked parameter\nread by this route?\nSource kind matches when supplied?"}
+
+    CONFIRMED["Confirmed\nmerge SAST+DAST evidence\nmerged_from = [sast.id, dast.id]\nconfidence = 0.95\nconsumed_dast_ids.add(dast.id)"]
+    CODE_ONLY["Code only\npreserve reachable flag\nno DAST consumed"]
+    RUNTIME_ONLY["Runtime only\nunconsumed DAST findings"]
+    SORT["sort_findings\nConfirmed → Corroborated → Code only → Runtime only\nthen by risk_score, confidence"]
+
+    SAST --> DEDUP_PRE --> ENRICH
+    DAST --> DEDUP_PRE
+    ROUTES --> ENRICH
+    ENRICH --> CANDIDATE
+    DAST --> CANDIDATE
+    ROUTES --> ROUTE_MATCH
+    CANDIDATE -->|Yes| ROUTE_MATCH
+    CANDIDATE -->|No candidate| CODE_ONLY
+    ROUTE_MATCH -->|Yes| SCOPE_MATCH
+    ROUTE_MATCH -->|No| CODE_ONLY
+    SCOPE_MATCH -->|Yes| PARAM_MATCH
+    SCOPE_MATCH -->|No| CODE_ONLY
+    PARAM_MATCH -->|Yes| CONFIRMED
+    PARAM_MATCH -->|No| CODE_ONLY
+    CONFIRMED --> SORT
+    CODE_ONLY --> SORT
+    DAST --> RUNTIME_ONLY
+    CONFIRMED -.->|"consumed_dast_ids\nprevents double-merge"| RUNTIME_ONLY
+    RUNTIME_ONLY --> SORT
 ```
 
-The correlation gate is conjunctive: target ID, CWE, route, scope, and attacked
-parameter must match; method and parameter source must match when supplied. A
-CWE-only or route-only match is not enough to label a pair Confirmed. Findings
-and routes with different `target_id` values never correlate. Unresolved route mounts, missing SAST
-locations, dynamic request keys, or absent parameter evidence remain unmatched.
-Each DAST finding can be consumed by at most one SAST finding in a run.
+**Corroborated label:** When `target_id`, CWE, route, and source location agree but request-input evidence is incomplete (parameter name missing or source kind absent), the pair is labelled `Corroborated` at confidence 0.7 rather than `Confirmed`. This is a lower-confidence intermediate state between Code only and Confirmed.
 
-### 4.4 Runtime Verification Loop — B-1
+**CWE normalisation:** `CWE-079` and `CWE-79` are treated as equal. Different CWE numbers are never treated as equivalent.
+
+### 4.4 DAST Planner — ScanPlan / ScanTask / ScanEvent
+
+```mermaid
+flowchart TD
+    SAST_F["SAST findings\n(after dedup)"]
+    ROUTES_P["RouteNode[]\n(resolved only)"]
+    BUDGET["budget_minutes=5\ndeadline_at (UTC ISO)"]
+
+    subgraph PRIORITY["Priority Classification"]
+        P0["Priority 0\nROUTE_SCOPE_MATCH\n+ PARAMETER_SURFACE_MATCH\nexact handler scope + supported inputs"]
+        P1["Priority 1\nHELPER_SCOPE_MATCH\n+ PARAMETER_SURFACE_MATCH\nhelper scope + supported inputs"]
+        P2["Priority 2\nROUTE_SCOPE_MATCH\n+ INPUT_EVIDENCE_INCOMPLETE\nmatching route, no param evidence"]
+        P3["Priority 3\nMULTIPLE_ROUTE_CANDIDATES\n→ GRAPHCODEBERT_TIEBREAK\nambiguous, model breaks tie"]
+        P4["Priority 4\nBROAD_COVERAGE\nno SAST match"]
+    end
+
+    subgraph TASKS["ScanTask generation"]
+        TGT["Targeted tasks\ncoalesced by route+method\nall applicable ZAP rule IDs\n15s ceiling each"]
+        BROAD["Broad tasks\nexclude targeted rule IDs\n5s ceiling each\nonly if budget remains"]
+    end
+
+    subgraph MODEL["GraphCodeBERT (advisory)"]
+        GCB["shadow_ranker.assess_candidates\nPriority 3 only\ncosine similarity score\nUNCLAIBRATED\nnever overrides gate"]
+    end
+
+    PLAN["ScanPlan\nscan_id · target_id · target_url\nplanner_version · rule_mapping_version\ncreated_at · deadline_at\ntargeted_tasks[] · broad_tasks[]\nunresolved_finding_ids[]\ncode_intelligence · intelligence_assessments"]
+
+    SAST_F --> PRIORITY
+    ROUTES_P --> PRIORITY
+    BUDGET --> PLAN
+    PRIORITY --> P0 & P1 & P2 & P3 & P4
+    P0 & P1 & P2 & P3 --> TGT
+    P4 --> BROAD
+    P3 --> MODEL --> TGT
+    TGT & BROAD --> PLAN
+```
+
+**ZAP rule mapping:**
+
+| CWE | ZAP Rule IDs |
+|---|---|
+| CWE-22 | 6 |
+| CWE-78 | 90020 |
+| CWE-79 | 40012, 40014 |
+| CWE-89 | 40018 |
+| CWE-601 | 20019 |
+
+### 4.5 Runtime Verification Workflow
 
 ```mermaid
 stateDiagram-v2
-    [*] --> probe_generator : Code only finding
+    [*] --> probe_generator : Code only finding\n(eligible sink type)
 
-    probe_generator : probe_generator\nselect payload by sink_type\nvariant 0=primary, 1=retry
+    probe_generator : probe_generator\nselect payload by sink_type\nvariant 0=primary, 1=retry\nNON_PROBEABLE_SINKS → UNVERIFIED
 
-    runtime_executor : runtime_executor\nhttpx.request() → selected profile origin\ntimeout = 2.0s HARD LIMIT\ninternal Docker network only
+    runtime_executor : runtime_executor\nhttpx.AsyncClient\nfollow_redirects=False, trust_env=False\ntimeout=2.0s HARD LIMIT\nGET/HEAD/OPTIONS/POST only\nresponse capped at 500 bytes
 
-    response_evaluator : response_evaluator\ncheck EVIDENCE_SIGNALS[sink_type]\nsql: OperationalError, sqlite3\nssti: 49, Jinja2\nxss: script, onerror\ncmd: CANARY_MITIGATA_2026
+    response_evaluator : response_evaluator\ncheck EVIDENCE_SIGNALS[sink_type]\nsql: operationalerror, sqlite3, syntax error\nssti: 49 (exact match), jinja2, templateerror\nxss: <svg, <img, onload=, onerror=\ncmd: canary_mitigata_2026\nopen_redirect: Location header check
 
     retry_evaluator : retry_evaluator\nvariant += 1\nclear error + response
 
     probe_generator --> runtime_executor
     runtime_executor --> response_evaluator
 
-    response_evaluator --> [*] : Evidence found\nlabel = Confirmed 🔴
-    response_evaluator --> retry_evaluator : No evidence\nAND variant == 0
+    response_evaluator --> [*] : Evidence found\nlabel = Confirmed 🔴\nsave_confirmed_result()
+    response_evaluator --> retry_evaluator : No evidence\nAND variant == 0\nAND no non-retryable error
     response_evaluator --> [*] : No evidence\nAND variant == 1\nlabel = Code only 🟡
 
-    retry_evaluator --> probe_generator : loop with variant=1
+    retry_evaluator --> probe_generator
 ```
 
-**Probe safety constraints:**
-- ✅ Canary strings only — never `DROP TABLE`, never OS commands
-- ✅ Internal Docker network only — no external traffic
-- ✅ 2.0s hard timeout — never blocks demo
-- ✅ Probes only on SAST-flagged routes — no spider/crawl
-- ✅ `probe_history` records all attempts for UI audit trail
+**Non-probeable sinks** (no safe runtime signal): `hardcoded_secret`, `insecure_deserialisation`, `jwt_weak_secret`, `weak_hash`
 
-### 4.5 3-Label Classifier — FR-7, FR-9
+**Non-retryable errors**: `invalid_target_profile`, `unsafe_http_method`, `invalid_route`, `invalid_parameter`, `invalid_parameter_source`, `unsupported_sink_type`, `path_parameter_not_found`
+
+**Flask 404 handler special case:** The SSTI finding in `pnf(e)` (`@app.errorhandler(404)`) has no route decorator. `_is_flask_not_found_handler` detects it via AST and generates a synthetic probe candidate at `/__mitigata_not_found__/{probe_path}`.
+
+### 4.6 3-Label Classifier — FR-7
 
 ```mermaid
 flowchart TD
-    INPUT([Finding after\ncorrelation + runtime verifier]) --> R1
+    INPUT([Finding after\ncorrelation + verification]) --> R1
 
-    R1{runtime verifier=Confirmed\nAND dual_confirmed?}
-    R1 -->|Yes| C1["🔴 Confirmed\nconfidence=0.98\ntarget + CWE + route + scope + parameter match"]
+    R1{"verification_label == Confirmed\nAND dual_confirmed?"}
+    R1 -->|Yes| C1["🔴 Confirmed\nconfidence = 0.98\nSAST + DAST + route + CWE both match"]
 
     R1 -->|No| R2
-    R2{runtime verifier=Confirmed?}
-    R2 -->|Yes| C2["🔴 Confirmed\nconfidence=0.90\nHTTP evidence captured"]
+    R2{"verification_label == Confirmed?"}
+    R2 -->|Yes| C2["🔴 Confirmed\nconfidence = 0.90\nHTTP evidence captured"]
 
     R2 -->|No| R3
-    R3{is_config_only?\nno code sink}
-    R3 -->|Yes| C3["🟠 Runtime only\nconfidence=0.85\nmissing headers/CORS/TLS"]
+    R3{"is_config_only?\n(no code sink)"}
+    R3 -->|Yes| C3["🟠 Runtime only\nconfidence = 0.85\nmissing headers / CORS / TLS"]
 
     R3 -->|No| R4
-    R4{ast_reachable\n== False?}
-    R4 -->|Yes| C4["🟡 Code only\nconfidence=0.95\ndead code — suppressed\nB-2: noise cut"]
+    R4{"ast_reachable == False?"}
+    R4 -->|Yes| C4["🟡 Code only\nconfidence = 0.95\ndead code — suppressed (B-2)"]
 
     R4 -->|No| R5
-    R5{ast_reachable\n== True?}
-    R5 -->|Yes| C5["🟡 Code only\nconfidence=0.70\nreachable but probe\ninconclusive"]
+    R5{"ast_reachable == True?"}
+    R5 -->|Yes| C5["🟡 Code only\nconfidence = 0.70\nreachable but probe inconclusive"]
 
-    R5 -->|No| C6["🟡 Code only\nconfidence=0.50\nAST unknown\nconservative"]
+    R5 -->|No| C6["🟡 Code only\nconfidence = 0.50\nAST unknown — conservative"]
 
     style C1 fill:#dc2626,color:#fff
     style C2 fill:#dc2626,color:#fff
@@ -437,57 +453,41 @@ flowchart TD
     style C6 fill:#ca8a04,color:#fff
 ```
 
-### 4.6 Patch Engine — B-4
+**Risk score (0–100):** `severity_score × 0.7 + exploitability × 0.6` where exploitability accumulates from label (+20 Confirmed, +15 Runtime only, +10 Corroborated), reachability (+10), parameter evidence (+10), and HTTP evidence (+10). Used for secondary sort within each label tier.
+
+### 4.7 Patch Engine — B-4
 
 ```mermaid
 flowchart LR
     subgraph INPUT["Input"]
-        FIND["Confirmed finding\nsink_type · file · line\ncode context ±5 lines"]
+        FIND["Confirmed finding\nsink_type · file · line\ncode context ±40 lines\ncwe_id"]
     end
 
     subgraph CHAIN["Sarvam GLM-5.3 → Template fallback"]
-        SARVAM["Sarvam Token Factory GLM-5.3\ntemp=0 · 10s timeout\nreturns unified diff"]
-        TPL["PATCH_TEMPLATES dict\nzero cost · always available\nCWE-89: parameterised query\nCWE-79: markupsafe.escape\nCWE-78: subprocess list args\nCWE-347: env JWT secret\nCWE-94: render_template()\nCWE-916: bcrypt"]
+        SARVAM["Sarvam Token Factory GLM-5.3\nSARVAM_BASE_URL + SARVAM_MODEL\ntemp=0 · 10s timeout · no SDK retries\nPrompt: sink_type + CWE + file + line + context\nNOT: target_id, scanner report, DAST payload"]
+        VALID["Validate: bounded single-file unified diff\nvalid hunk counts\nexact repo-relative a/ b/ paths"]
+        TPL["PATCH_TEMPLATES dict\nCWE-89: parameterised query\nCWE-79: markupsafe.escape\nCWE-78: subprocess list args\nCWE-94: render_template()\nCWE-347: env JWT secret\nCWE-916: bcrypt\nCWE-95: remove eval\nCWE-22: path resolve + check\nCWE-601: allowlist redirect\nCWE-502: data-only format"]
     end
 
     subgraph APPLY["Apply + Re-verify"]
-        CHECK["git apply --check\ndry-run validation"]
-        APPLY2["git apply\nwrite only to selected target source"]
-        REVERIFY["Re-run same runtime verifier probe\nexact same payload"]
-        RESULT["✅ Fix Verified\nor ❌ Re-patch Required"]
+        PREVIEW["_PATCH_PREVIEWS cache\nprevent replay attacks\npatch must match stored preview"]
+        APPLY2["apply_unified_diff()\nvalidate a/ b/ paths\nwrite to source file"]
+        REVERIFY["clear_target_verifications\nclear_graph_snapshot_cache\nRe-run same canary probe"]
+        RESULT["PatchResult.kind:\nunified_diff or remediation_snippet\nneither applied automatically"]
     end
 
-    FIND --> GPT4O
-    GPT4O -->|valid diff| CHECK
-    GPT4O -->|fail/invalid| MINI
-    MINI -->|valid diff| CHECK
-    MINI -->|fail| TPL
-    TPL --> CHECK
-    CHECK --> APPLY2 --> REVERIFY --> RESULT
+    FIND --> SARVAM
+    SARVAM --> VALID
+    VALID -->|Valid diff| PREVIEW
+    VALID -->|Invalid / error| TPL
+    TPL --> PREVIEW
+    PREVIEW --> APPLY2 --> REVERIFY --> RESULT
 ```
 
-### 4.7 Compliance Translator
+### 4.8 Compliance Translator
 
 ```mermaid
 flowchart TD
-    FIND([Confirmed finding\ncwe_id · severity]) --> RISK & MAP
-
-    subgraph RISK["Financial Risk (IBM 2024 India)"]
-        PROB["breach_probability\nHIGH=65% · MEDIUM=40%\nCRITICAL=85% · LOW=15%"]
-        EXP["total_exposure_inr\n= records × ₹5,000 × prob\nexample HIGH 10k records:\n= ₹3,25,00,000"]
-        INS["cyber_insurance_impact\n> ₹50L threshold → TRUE"]
-        INC06["INC-06 reference\n2017 Credit Bureau Breach\n145M records\n₹61,625 crore exposure"]
-    end
-
-    subgraph MAP["4-Framework Compliance Mapping"]
-        RBI["RBI CSF\nAnnex I §4.2 — Input Validation\nAnnex I §4.3 — IAM\nAnnex II — Advanced Measures"]
-        SEBI["SEBI CSCRF\nDomain 3: IAM\nDomain 5: Application Security"]
-        ISO["ISO 27001:2022\nA.8.28 — Secure coding\nA.8.5 — Secure authentication\nA.5.17 — Auth information"]
-        DPDP["DPDP Act 2023\n§8(1) — Reasonable safeguards\n§8(2) — Unauthorised access\n§9 — Children's data"]
-    end
-
-    RISK --> OUT
-    MAP --> OUT
     OUT["ComplianceReport\n{financial_risk, compliance,\nframeworks_covered, inc06_ref}"]
 ```
 

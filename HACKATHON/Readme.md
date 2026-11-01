@@ -1,263 +1,362 @@
-# SAST-DAST Correlator
+# Mitigata — SAST/DAST Correlation Engine
+### Hackathon Problem 06 · Flagship Challenge
 
-## Current phase: targets, scanners, and Docker
+> **One pipeline. Two scanners. Every real vulnerability appears exactly once — with the line of code and live HTTP proof.**
 
-The current codebase contains Python and JavaScript route parsers. Phase 1 adds
-pinned upstream targets, per-target profiles, and a Docker Compose network that
-keeps intentionally vulnerable apps isolated from host access.
+---
 
-From this directory, in PowerShell, fetch the target sources and start the
-engine, dashboard, and target applications:
+## What This Is
 
-```powershell
-.\scripts\fetch_targets.ps1
-.\scripts\fetch_flask_wheels.ps1
+Mitigata is a hybrid **SAST + DAST correlation engine** built for Hackathon Problem 06. It scans an application's source code with Semgrep and its running version with OWASP ZAP, then deterministically links the results so each real vulnerability appears once — with both the exact file/line and proof it can be exploited at runtime.
+
+**Three mandatory objectives, fully implemented:**
+
+| Objective | What it does | Key component |
+|---|---|---|
+| **01 — Scan Code & App** | Semgrep + ZAP, ≥ 4 CWE types, one common format | `UnifiedFinding` schema |
+| **02 — Correlate & Merge** | Link runtime → code via three-pass AST route mapping | `correlator.py` + route adapters |
+| **03 — Prioritise** | Confirmed / Code only / Runtime only labels, ranked | `classifier.py` + React UI |
+
+---
+
+## Quick Start
+
+### One-command startup (Docker)
+
+```bash
+git clone https://github.com/Halcyora/mitigata.git
+cd mitigata/HACKATHON
+cp .env.example .env          # add SARVAM_API_KEY if you have one
 docker compose up --build
 ```
 
-Compose builds and starts the Flask reference app and OWASP Juice Shop. The
-targets bind only to host loopback ports 5050 and 3002 by default. Scanner images are
-configured as on-demand Compose services: Semgrep can read target source but
-cannot reach the target network; ZAP can reach only the isolated target
-network. Do not expose these intentionally vulnerable target containers to
-untrusted networks.
+- **Correlation Workbench** → http://localhost:3000
+- **Engine API + Swagger docs** → http://localhost:8000/docs
 
-The Compose API container cannot launch scanner jobs because it has no access to
-the host Docker daemon. To use the dashboard's **Run SAST** and **Run targeted +
-broad DAST** actions, use the host API mode below: it leaves the target apps and
-scanners in Docker and runs FastAPI on the host where Docker Compose is available.
-
-### Run the API and GraphCodeBERT in the host Python environment
-
-Use this path when the engine Docker image cannot be rebuilt (for example, when
-the Docker build environment cannot validate the package index certificate).
-Docker still provides the isolated Flask and Juice Shop targets and the
-containerized scanners; FastAPI and GraphCodeBERT run in your local Python
-environment. The local launcher stops the Compose engine/frontend services,
-starts only the two targets, and sets their loopback URLs for API verification.
-It does not build the engine image.
-
-From this directory in PowerShell, prepare the Python environment once:
+### Host-mode (Python, no Docker rebuild)
 
 ```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+# Windows
+cd HACKATHON
+scripts\start_local_engine.ps1
 ```
 
-Fetch the pinned target sources and Flask wheelhouse if they are not present,
-then start the local API:
-
-```powershell
-.\scripts\fetch_targets.ps1
-.\scripts\fetch_flask_wheels.ps1
-.\scripts\start_local_engine.ps1
+```bash
+# Linux / macOS
+cd HACKATHON
+pip install -r requirements.txt
+uvicorn engine.api.main:app --reload --port 8000
 ```
 
-The first planner request downloads the pinned GraphCodeBERT model into the
-host Hugging Face cache if it is not cached already. The model runs on CPU and
-planner status reports download or inference failures; it does not substitute
-synthetic scores. Open a second terminal to start the UI from the host:
+### Offline demo (pre-seeded fixtures)
 
-```powershell
-cd frontend
-npm install
-npm run dev
+```bash
+python scripts/load_sample.py configs/flask_demo.yaml
+python scripts/load_sample.py configs/juice_shop.yaml
 ```
 
-The UI is at [http://localhost:5173](http://localhost:5173). The host API is at
-[http://localhost:8000](http://localhost:8000). For bounded DAST, run the scan
-CLI from the project root in a third terminal; ZAP remains isolated in Docker
-and continues to use the Compose-only target network:
+---
+
+## Target Profiles
+
+Two selectable targets — select one per scan run:
+
+| Profile | App | Language | Port | Role |
+|---|---|---|---|---|
+| `flask_demo` | [we45/Vulnerable-Flask-App](https://github.com/we45/Vulnerable-Flask-App) | Python / Flask | 5050 | Baseline, controlled fixtures, fast offline demo |
+| `juice_shop` | [OWASP Juice Shop](https://github.com/juice-shop/juice-shop) | JavaScript / Express | 3001 | Second-language validation on a real app |
+
+Fetch targets before first run:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts/run_scan.py configs/flask_demo.yaml --dast --dast-minutes 5
+scripts\fetch_targets.ps1
+scripts\fetch_flask_wheels.ps1   # pre-built Flask wheels for offline installs
 ```
 
-The five-minute limit covers ZAP startup, route tests, alert collection, and
-cleanup after the target is healthy and the plan is ready. Semgrep and planner
-time are reported separately. This CLI path does not require the engine image.
+---
 
-Run a real SAST scan, or SAST followed by Semgrep-guided targeted DAST and
-broader route coverage, from this directory:
+## Running Scans
 
-```powershell
-python -m pip install -r requirements.txt
+```bash
+# SAST only
 python scripts/run_scan.py configs/flask_demo.yaml
+
+# SAST + targeted DAST (5-minute ZAP budget)
 python scripts/run_scan.py configs/flask_demo.yaml --dast
+
+# Juice Shop
 python scripts/run_scan.py configs/juice_shop.yaml --dast
-python scripts/run_scan.py configs/flask_demo.yaml --dast --dast-minutes 3
+
+# Evaluate against ground truth
+python scripts/evaluate.py configs/flask_demo.yaml
 ```
 
-The first scan pulls the pinned scanner images. Semgrep also needs outbound
-network access to resolve configured rule packs. If your network inspects TLS
-and Semgrep cannot validate its certificate chain, set `MITIGATA_CA_CERT_PATH`
-to a PEM CA certificate trusted by your machine; the runner mounts it read-only
-for Semgrep and keeps certificate verification enabled. In the local-engine
-setup, put `MITIGATA_CA_CERT_PATH=C:\path\to\trusted-ca.pem` in `.env` before
-running `scripts/start_local_engine.ps1`, or set the variable in PowerShell
-before launching the API. For DAST, the AST route
-inventory is joined to normalized Semgrep findings by target-relative file and
-line scope. Explainable priority tiers schedule mapped route/method/CWE rule
-tasks first; ZAP enables only the mapped scanners for those tasks, then tests
-the route inventory with the same six verified security scanners used by the
-initial rule map. Each route is seeded directly into ZAP's site tree and
-active-scanned within the exact selected-target context; per-task timeouts leave
-budget for later routes.
+---
 
-The initial rule map covers CWE-22, CWE-78, CWE-79, CWE-89, and CWE-601 using
-scanner IDs verified in the pinned ZAP image. Unsupported input bindings (JSON
-body and headers) are recorded in the plan rather than fabricated. DAST has a
-1-30 minute budget (default 5); task states, priorities, route evidence, and
-coverage are written to `data/raw/<target>-scan-plan.json`, while standard
-ZAP alerts and task outcomes are written to `data/raw/<target>-zap.json`.
-Untested routes are reported as incomplete, not safe. Scanner failures stop the
-command instead of silently substituting sample or placeholder findings.
-
-### Python target framework support
-
-Python target profiles may set `framework` to `flask`, `fastapi`, or `django`.
-The shared Python AST adapter discovers Flask routes and blueprints, FastAPI
-`app`/`router` decorators and included router prefixes, and Django `path()` or
-`re_path()` function views plus simple `include()` URLconf prefixes. It
-normalizes dynamic path segments and maps request reads and FastAPI scalar
-handler arguments into route input parameters for SAST-to-route correlation.
-Put target source under `targets/` and provide `source_dir`, `target_url`,
-`language: python`, and the matching framework in its profile. Dynamic route
-construction, third-party router wrappers, and complex Django URLconf patterns
-may not resolve; those routes are left out rather than guessed.
-
-The engine image loads the pinned `microsoft/graphcodebert-base` encoder locally
-for advisory ranking of deterministically mapped ambiguous route candidates.
-`GRAPHCODEBERT_MODE=OFF` disables this step; model loading or inference failures
-are surfaced in planner status and never replaced with generated scores. The
-encoder compares a finding/route query with each candidate's source context by
-cosine similarity and a graph-guided attention mask built from lexical identifier
-def/use links. These links approximate data flow and are not a taint analysis.
-Scores are uncalibrated and are not vulnerability
-probabilities. The five-minute DAST clock begins after the selected target is
-healthy and the scan plan is ready; it includes ZAP startup, route tests, alert
-collection, and cleanup. Targeted and broad route tasks are capped at 15
-seconds. Semgrep and planning time are listed separately from
-ZAP execution time. The engine image preloads model weights during its build;
-the local Python CLI downloads the same pinned weights on first use if they are
-not already in the Hugging Face cache, before starting the DAST clock.
-
-The Flask wheelhouse is downloaded on the host using its trusted certificate
-store, then installed offline in the container. This avoids weakening TLS
-verification in the legacy target's container build.
-
-See [targets/README.md](targets/README.md) for upstream revisions and isolation
-details. The profiles are [configs/flask_demo.yaml](configs/flask_demo.yaml)
-and [configs/juice_shop.yaml](configs/juice_shop.yaml).
-
-The Flask upstream is an old Python 2 application. Its source remains unchanged
-and is run through a separate Python 3 compatibility overlay in
-`targets/vulnerable_flask`; this is only an isolated test target, not a
-production service. Target source checkouts are ignored by Git and pinned by
-`scripts/fetch_targets.ps1`.
-
-## Planned project structure
+## Repository Structure
 
 ```
-sast-dast-correlator/
-├── README.md                      # how to run, demo steps
-├── requirements.txt               # fastapi, uvicorn, pydantic, zaproxy, streamlit, pytest, pyyaml, requests
-├── docker-compose.yml             # zap, juice-shop, flask-target, (optional) app
-├── .env.example                   # ZAP_API_KEY, ZAP_URL, LLM_API_KEY (optional)
-│
-├── configs/                       # Step 1: application profiles
-│   ├── flask_demo.yaml            # source_dir, target_url, language, semgrep packs, excludes
-│   └── juice_shop.yaml
-│
-├── targets/                       # apps under test (your own, local only)
-│   ├── vulnerable_flask/
-│   │   ├── app.py
-│   │   ├── Dockerfile
-│   │   └── GROUND_TRUTH.md        # list of known vulns, used for your accuracy table
-│   └── juice-shop/                # git clone of OWASP Juice Shop (source for SAST)
-│
-├── sastdast/                      # main Python package
-│   ├── __init__.py
-│   ├── config.py                  # loads YAML, picks adapter by language
-│   ├── pipeline.py                # runs steps 2 to 7 in order, saves results
-│   │
-│   ├── scanners/                  # Steps 2 and 4
-│   │   ├── semgrep_runner.py      # runs semgrep, returns raw JSON
-│   │   └── zap_runner.py          # spider, ajax spider, active scan, alerts
-│   │
-│   ├── adapters/                  # Step 3: language-specific, pluggable
-│   │   ├── base.py                # RouteAdapter interface: discover_routes(source_dir)
-│   │   ├── flask_adapter.py       # Python ast based
-│   │   ├── express_adapter.py     # calls the Node script, parses its JSON
-│   │   └── js/
-│   │       └── extract_routes.js  # TypeScript Compiler API or Babel route extractor
-│   │
-│   ├── core/                      # Steps 5 to 7: language-independent engine
-│   │   ├── models.py              # Finding, Route, Issue (pydantic)
-│   │   ├── normalize.py           # from_semgrep(), from_zap(), severity maps
-│   │   ├── cwe.py                 # CWE extraction, fallback table, alias table
-│   │   ├── routing.py             # find_route(method, url), find_route_for_code(file, line)
-│   │   ├── correlate.py           # matching, scoring pairs, merge, dedupe, classify
-│   │   ├── score.py               # risk score and sorting
-│   │   └── fixes.py               # CWE template fixes + optional LLM layer
-│   │
-│   ├── storage/
-│   │   ├── db.py                  # SQLite setup, save and load scans and issues
-│   │   └── schema.sql
-│   │
-│   └── api/                       # Step 8: API
-│       └── main.py                # FastAPI: /scans, /scans/{id}/issues, /issues/{id}
-│
-├── dashboard/                     # Step 8: UI
-│   └── app.py                     # Streamlit: summary bar, sorted table, detail panel, export
-│
+HACKATHON/
+├── configs/
+│   ├── flask_demo.yaml          # Python/Flask profile: source, URL, Semgrep packs
+│   └── juice_shop.yaml          # JavaScript/Express profile
+├── targets/
+│   ├── vulnerable_flask/        # we45 Flask target + dead_code_helpers.py
+│   └── juice-shop/              # OWASP Juice Shop checkout
 ├── data/
-│   ├── raw/                       # saved semgrep.json, zap_alerts.json per scan
-│   ├── sample/                    # pre-recorded results for the demo fallback
-│   │   ├── flask_semgrep.json
-│   │   ├── flask_zap.json
-│   │   ├── juice_semgrep.json
-│   │   └── juice_zap.json
-│   └── scans.db                   # SQLite (git-ignored)
-│
-├── tests/
-│   ├── test_normalize.py
-│   ├── test_flask_adapter.py
-│   ├── test_routing.py
-│   ├── test_correlate.py          # the 5 or 6 hand-written match / no-match cases
-│   └── test_score.py
-│
-├── scripts/
-│   ├── run_scan.py                # CLI: python scripts/run_scan.py configs/flask_demo.yaml
-│   ├── load_sample.py             # load data/sample/* so the demo works offline
-│   └── evaluate.py                # compares output with GROUND_TRUTH.md, prints accuracy table
-│
-└── docs/
-    ├── architecture.png           # diagram for the report
-    ├── report.md                  # 3 to 4 page submission report
-    └── demo_script.md             # 4 to 5 minute demo flow
+│   ├── ground_truth/            # per-target verified answer keys
+│   ├── raw/                     # live scan output (semgrep/zap/verification JSON)
+│   └── sample/                  # pre-seeded offline fixtures
+├── engine/
+│   ├── adapters/                # Flask + Express RouteAdapter implementations
+│   ├── api/                     # FastAPI: /api/graph, /api/verify, /api/patch, /api/compliance
+│   ├── ast_mapper/              # three-pass route mapper, sink detector, call graph, merger
+│   ├── classifier/              # Confirmed / Code only / Runtime only + risk scoring
+│   ├── code_intelligence/       # GraphCodeBERT shadow ranker (advisory)
+│   ├── compliance/              # INR risk calculator + RBI/SEBI/ISO/DPDP mapping
+│   ├── dast_planner/            # ScanPlan / ScanTask / ScanEvent + ZAP rule mapping
+│   ├── ingestion/               # semgrep_parser, zap_parser, correlator, deduplication, schema
+│   ├── patch_engine/            # Sarvam GLM-5.3 → template fallback patch generator
+│   ├── scan_manager/            # scan job lifecycle, event store, history, state
+│   └── verification/            # bounded runtime probe workflow (SSE stream)
+├── frontend/
+│   └── src/
+│       ├── App.tsx
+│       ├── components/
+│       │   ├── CorrelationGraph.tsx   # React Flow + ELK layered layout
+│       │   ├── BusinessRiskPanel.tsx  # INR exposure + compliance frameworks
+│       │   └── PlannerPanel.tsx       # DAST plan preview + task queue
+│       └── hooks/
+│           └── useVerification.ts     # SSE hook for live label flip
+├── tests/                       # pytest suite (14 test modules)
+├── scripts/                     # run_scan, load_sample, evaluate, zap_api_driver, check_sarvam
+├── docker-compose.yml
+├── requirements.txt
+└── AGENTS.md
 ```
 
-## Planned Tech Stack
+---
 
-## Current API and evaluation
+## Architecture Overview
 
-The current dashboard runs at [http://localhost:3000](http://localhost:3000)
-after `docker compose up --build`. The FastAPI service exposes:
-
-- `GET /api/graph?target_id=flask_demo`
-- `GET /api/compliance?target_id=flask_demo`
-- `GET /api/planner?target_id=flask_demo`
-- `POST /api/patch` to generate a patch preview
-- `POST /api/patch/apply` to apply the reviewed server-generated diff inside the selected target source tree
-- `GET /api/export/sarif?target_id=flask_demo`; use `fail_on_confirmed_high=true` for a CI gate
-
-Evaluate scanner reports against the selected target's manifest with:
-
-```powershell
-python scripts/evaluate.py --target flask_demo --semgrep data/sample/flask_demo_semgrep.json --zap data/sample/flask_demo_zap.json
+```
+Browser :3000
+    │
+    ▼
+React Frontend (Correlation Workbench)
+    │   GET /api/graph?target_id=flask_demo
+    ▼
+FastAPI Engine :8000
+    ├── semgrep_parser  →  UnifiedFinding[] (SAST)
+    ├── zap_parser      →  UnifiedFinding[] (DAST)
+    ├── Flask/Express adapter
+    │     Pass 1: route declarations + prefix resolution → normalized RouteNode[]
+    │     Pass 2: handler + one-hop helper scopes       → CodeScope[]
+    │     Pass 3: request parameter reads               → ParameterRead[]
+    ├── DAST planner: ScanPlan + ScanTask queue (targeted → broad)
+    │     advisory GraphCodeBERT ranking for ambiguous candidates
+    ├── correlator: target_id + CWE + route + scope + parameter → Confirmed
+    ├── classifier: Confirmed / Code only / Runtime only + risk score
+    └── ELK layout → GraphResponse {nodes, edges, stats}
+    │
+    ▼
+Docker internal network
+    ├── Flask target  :5050  (internal only)
+    └── Juice Shop    :3001  (internal only)
 ```
 
-The Juice Shop manifest covers the repository's checked-in offline sample
-fixtures, not a complete vulnerability inventory. See [docs/BUILD.md](docs/BUILD.md)
-and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Full architecture diagrams: [`docs/P06-Architecture.md`](docs/P06-Architecture.md)
+
+---
+
+## API Reference
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/graph?target_id=...` | Full correlation graph — nodes, edges, stats. Cached 10 s. |
+| `GET /api/verify/{id}/stream?target_id=...` | SSE stream — live label flip Code only → Confirmed |
+| `POST /api/patch` | Generate unified diff patch (Sarvam GLM-5.3 → template fallback) |
+| `POST /api/patch/apply` | Apply approved patch + invalidate graph cache |
+| `GET /api/compliance?target_id=...` | INR exposure + RBI/SEBI/ISO 27001/DPDP 2023 per finding |
+| `GET /api/export/sarif?target_id=...` | SARIF 2.1 export; `fail_on_confirmed_high=true` returns HTTP 409 for CI gates |
+| `GET /api/planner?target_id=...` | DAST scan plan preview (does not start a scan) |
+| `POST /api/scans` | Start a SAST or DAST scan job |
+| `GET /api/scans/latest?target_id=...` | Latest scan job status + phase counts |
+| `GET /api/scans/compare?target_id=...` | Diff two consecutive scans: new / fixed / still-open |
+| `GET /health` | Docker healthcheck |
+| `GET /docs` | Swagger UI (auto-generated) |
+
+---
+
+## Finding Labels
+
+| Label | Meaning | Rank |
+|---|---|---|
+| 🔴 **Confirmed** | SAST code evidence + DAST runtime proof; all correlation checks pass | 1 — Fix immediately |
+| 🟡 **Code only** | SAST finding did not pass the strict correlation gate; AST reachability retained separately | 2 — Review |
+| 🟠 **Runtime only** | DAST finding not consumed by a confirmed pair | 3 — Investigate |
+
+> Confirmed findings always rank first in every view, API response, and SARIF export.
+
+---
+
+## Correlation Gate
+
+A SAST/DAST pair is labelled **Confirmed** only when **all** of the following agree:
+
+1. `target_id` — same profile; findings from different targets never correlate
+2. `cwe_id` — same CWE number (normalised: `CWE-079` == `CWE-79`)
+3. Normalised route — DAST URL path matches the route template (e.g. `/api/orders/{param}`)
+4. HTTP method — must match when the DAST scanner reports one
+5. Code scope — SAST `file:line` falls within the handler or a direct one-hop helper scope
+6. Attacked parameter — DAST parameter name is read by the route; source kind must match when supplied
+
+A CWE-only or route-only match is **never** sufficient.
+
+---
+
+## Vulnerability Coverage
+
+| CWE | Type | Mandatory | Status |
+|---|---|---|---|
+| CWE-89 | SQL Injection | ✅ | Detected + correlated |
+| CWE-79 | XSS | ✅ | Detected + correlated |
+| CWE-78 | Command Injection | Pick ≥ 2 | Detected |
+| CWE-22 | Path Traversal | Pick ≥ 2 | Detected |
+| CWE-601 | Open Redirect | Pick ≥ 2 | Detected |
+| CWE-798 | Hard-coded Secrets | Pick ≥ 2 | Detected |
+| CWE-94 | SSTI | Bonus | Detected + live probe |
+| CWE-347 | JWT Weak Secret | Bonus | Detected |
+| CWE-502 | Insecure Deserialisation | Bonus | Detected |
+| CWE-916 | Weak Hash | Bonus | Detected |
+
+---
+
+## Runtime Verification
+
+Click **Verify** on any *Code only* finding in the UI to start a bounded probe:
+
+1. **probe_generator** — selects a safe canary payload for the sink type (e.g. `{{7*7}}` for SSTI)
+2. **runtime_executor** — fires an `httpx` request to the configured local target origin; 2 s hard timeout; no external traffic
+3. **response_evaluator** — checks response for sink-specific evidence signals
+4. **retry_evaluator** — retries once with a variant payload if the first attempt is inconclusive
+
+A positive result flips the label to **Confirmed** live in the UI via SSE and persists the result to `data/raw/<target>-verification.json`.
+
+Non-probeable sinks (hardcoded secrets, JWT weak secrets, weak hashes, insecure deserialisation) remain `UNVERIFIED` — no safe runtime signal exists for them.
+
+---
+
+## Patch Generation
+
+Click **Auto-Remediate** on a Confirmed finding:
+
+1. Engine reads ±40 lines of source context around the sink
+2. Calls **Sarvam GLM-5.3** (`SARVAM_API_KEY` required) — returns a unified diff
+3. Falls back to **deterministic CWE-mapped templates** if the LLM is unavailable or returns invalid output
+4. Shows a Git diff preview in the UI before applying
+5. Applies the patch and re-runs the same canary probe to verify the fix
+
+Set `SARVAM_API_KEY` in `.env`. Run `python scripts/check_sarvam.py` to verify the key.
+
+---
+
+## Compliance & Business Risk
+
+`GET /api/compliance?target_id=flask_demo` returns per-finding:
+
+- **INR financial exposure** — `records × ₹5,000/record × breach_probability` (IBM Cost of a Data Breach 2024, India benchmark)
+- **RBI Cyber Security Framework** — Annex I / Annex II control mapping
+- **SEBI CSCRF** — Application Security + IAM domain mapping
+- **ISO 27001:2022** — Annex A control mapping (A.8.28 Secure coding, etc.)
+- **DPDP Act 2023** — §8(1) / §8(2) obligation mapping
+- **Cyber insurance impact flag** — `true` when exposure exceeds ₹50 L threshold
+
+---
+
+## DAST Planner & GraphCodeBERT
+
+Before ZAP runs, the engine builds a `ScanPlan`:
+
+- Maps SAST findings to route + parameter + ZAP rule candidates
+- Assigns priority classes: `ROUTE_SCOPE_MATCH` → `HELPER_SCOPE_MATCH` → `INPUT_EVIDENCE_INCOMPLETE` → `BROAD_COVERAGE`
+- When `GRAPHCODEBERT_MODE=ON`, the **GraphCodeBERT shadow ranker** (`microsoft/graphcodebert-base`, pinned revision) ranks ambiguous candidates by cosine similarity — **advisory only**, never overrides the correlation gate
+- Produces targeted tasks (15 s ceiling each) and broad fallback tasks (5 s ceiling each) within a 5-minute ZAP budget
+
+Set `GRAPHCODEBERT_MODE=OFF` (default) to skip the model step entirely without affecting correlation.
+
+---
+
+## Scan Comparison & SARIF Export
+
+```bash
+# Compare latest vs previous scan
+GET /api/scans/compare?target_id=flask_demo
+# → {new: [...], fixed: [...], still_open: [...]}
+
+# SARIF export
+GET /api/export/sarif?target_id=flask_demo
+
+# CI gate — returns HTTP 409 when a Confirmed HIGH/CRITICAL finding exists
+GET /api/export/sarif?target_id=flask_demo&fail_on_confirmed_high=true
+```
+
+---
+
+## Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `TARGET_PROFILE` | `flask_demo` | Active target profile for Docker Compose |
+| `TARGETS_ROOT` | `/targets` | Volume mount path for target source trees |
+| `SARVAM_API_KEY` | _(empty)_ | Sarvam Token Factory key — leave blank for template patches |
+| `SARVAM_BASE_URL` | `https://api.sarvam.ai/v2` | Sarvam API base URL |
+| `SARVAM_MODEL` | `glm5.3` | Sarvam model name |
+| `GRAPHCODEBERT_MODE` | `OFF` | `ON` to enable advisory GraphCodeBERT ranking |
+| `MITIGATA_CONFIG_DIR` | `configs/` | Override config directory |
+
+Copy `.env.example` to `.env` and fill in values. **Never commit `.env`.**
+
+---
+
+## Tests
+
+```bash
+cd HACKATHON
+pip install -r requirements.txt
+pytest tests/ -v
+```
+
+14 test modules covering: ingestion, AST mapper, correlator, classifier, verification workflow, DAST planner, scan manager, patch engine, API graph, ZAP driver, parsers e2e, GraphCodeBERT shadow ranker, and incremental correlation.
+
+---
+
+## Network Isolation
+
+```
+Host machine
+  ├── :3000  → frontend  (public network)
+  ├── :8000  → engine    (public + internal network)
+  ├── :5050  ✗  (Flask target — internal only, not reachable from host)
+  └── :3001  ✗  (Juice Shop — internal only, not reachable from host)
+```
+
+All verification probes route through the Docker internal network. No probe ever leaves the local machine.
+
+---
+
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [`docs/P06-Architecture.md`](docs/P06-Architecture.md) | Full Mermaid architecture diagrams — data flow, component deep-dives, schemas, API contract |
+| [`docs/P06-SAST-DAST-Correlation-Engine.md`](docs/P06-SAST-DAST-Correlation-Engine.md) | Problem statement, three objectives, scoring criteria, definition of done |
+| [`docs/P06-Build-Plan.md`](docs/P06-Build-Plan.md) | Phase-by-phase build plan, FR-to-component mapping, bonus feature tracking |
+| [`docs/P06-PRD.md`](docs/P06-PRD.md) | Product requirements — source of truth |
+| [`engine/README.md`](engine/README.md) | Engine package internals — route mapping, verification, classifier, patch, API |
+| [`AGENTS.md`](AGENTS.md) | AI agent context and task history |
+
+---
+
+*Mitigata · Hackathon Problem 06 · Flagship Challenge*
+*Inspired by the 2017 Credit Bureau Breach — INC-06 — 145 million records*
