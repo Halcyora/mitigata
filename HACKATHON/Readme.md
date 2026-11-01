@@ -113,6 +113,19 @@ ZAP alerts and task outcomes are written to `data/raw/<target>-zap.json`.
 Untested routes are reported as incomplete, not safe. Scanner failures stop the
 command instead of silently substituting sample or placeholder findings.
 
+### Python target framework support
+
+Python target profiles may set `framework` to `flask`, `fastapi`, or `django`.
+The shared Python AST adapter discovers Flask routes and blueprints, FastAPI
+`app`/`router` decorators and included router prefixes, and Django `path()` or
+`re_path()` function views plus simple `include()` URLconf prefixes. It
+normalizes dynamic path segments and maps request reads and FastAPI scalar
+handler arguments into route input parameters for SAST-to-route correlation.
+Put target source under `targets/` and provide `source_dir`, `target_url`,
+`language: python`, and the matching framework in its profile. Dynamic route
+construction, third-party router wrappers, and complex Django URLconf patterns
+may not resolve; those routes are left out rather than guessed.
+
 The engine image loads the pinned `microsoft/graphcodebert-base` encoder locally
 for advisory ranking of deterministically mapped ambiguous route candidates.
 `GRAPHCODEBERT_MODE=OFF` disables this step; model loading or inference failures

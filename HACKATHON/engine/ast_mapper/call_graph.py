@@ -12,7 +12,7 @@ from .sink_detector import SinkFinding, summarize_route_and_sink_coverage
 def adapter_for(profile: TargetProfile) -> RouteAdapter:
     language = profile.language.lower()
     framework = profile.framework.lower()
-    if language == "python" and framework == "flask":
+    if language == "python" and framework in {"flask", "fastapi", "django"}:
         return FlaskRouteAdapter()
     if language in {"javascript", "typescript", "js", "ts"} and framework == "express":
         return ExpressRouteAdapter()

@@ -11,18 +11,20 @@ from ..ast_mapper.route_schema import CodeScope, ParameterRead, RouteNode
 from .base import TargetProfile
 
 
-_PATH_PARAMETER = re.compile(r"<(?:[A-Za-z_][A-Za-z0-9_]*:)?([A-Za-z_][A-Za-z0-9_]*)>")
+_PATH_PARAMETER = re.compile(r"<(?:[A-Za-z_][A-Za-z0-9_]*:)?([A-Za-z_][A-Za-z0-9_]*)>|\{([A-Za-z_][A-Za-z0-9_]*)(?:\:[^}]+)?\}")
 _REQUEST_SOURCE = {
     "args": "query",
     "values": "query",
     "form": "form",
     "json": "json",
     "headers": "header",
+    "query_params": "query", "path_params": "path", "GET": "query",
+    "POST": "form", "FILES": "form", "COOKIES": "cookie",
 }
 
 
 class FlaskRouteAdapter:
-    """Flask route discovery and source enrichment using Python's AST."""
+    """Python web route discovery and enrichment for Flask, FastAPI and Django."""
 
     def __init__(self) -> None:
         self._profile_key: tuple[str, Path] | None = None
@@ -114,7 +116,7 @@ class FlaskRouteAdapter:
         index = self._index_project(profile)
         for route in routes:
             reads: set[tuple[str, str]] = {
-                (name, "path") for name in _PATH_PARAMETER.findall(route.raw_url)
+                (name, "path") for pair in _PATH_PARAMETER.findall(route.raw_url) for name in pair if name
             }
             for scope in route.scopes:
                 context = index.files.get(scope.file)
@@ -122,6 +124,14 @@ class FlaskRouteAdapter:
                 if symbol is None:
                     continue
                 reads.update(self._request_reads(symbol.node))
+                if scope == route.scopes[0] and isinstance(symbol.node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    path_names = {name for pair in _PATH_PARAMETER.findall(route.raw_url) for name in pair if name}
+                    for arg in symbol.node.args.args:
+                        if arg.arg in {"self", "cls", "request", "req", "db", "session"} or arg.arg in path_names:
+                            continue
+                        annotation = ast.unparse(arg.annotation) if arg.annotation else ""
+                        source = "body" if any(token in annotation for token in ("Body", "Form", "File", "UploadFile")) else "query"
+                        reads.add((arg.arg, source))
             route.input_parameters = [
                 ParameterRead(name=name, source=source)
                 for name, source in sorted(reads)
@@ -217,11 +227,11 @@ class FlaskRouteAdapter:
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
             if (
                 isinstance(node.func.value, ast.Name)
-                and node.func.value.id == "request"
+                and node.func.value.id in {"request", "req"}
                 and node.func.attr == "get_json"
             ):
                 return "json"
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-            if node.value.id == "request":
+            if node.value.id in {"request", "req"}:
                 return _REQUEST_SOURCE.get(node.attr)
         return None

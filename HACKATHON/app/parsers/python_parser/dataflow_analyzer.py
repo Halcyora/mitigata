@@ -1,7 +1,7 @@
 # app/parsers/python_parser/dataflow_analyzer.py
 import ast
 from typing import Dict, List, Set, Tuple
-from app.normalizer.route_normalizer import FLASK_PATH_VAR_NAME_PATTERN
+from app.normalizer.route_normalizer import PYTHON_PATH_VAR_NAME_PATTERN
 from app.parsers.python_parser.ast_parser import PythonProjectIndex
 from app.parsers.python_parser.flask_route_mapper import RawFlaskRoute
 from app.schemas.route import CalleeScope, NormalizedRoute, RouteParameter
@@ -58,18 +58,22 @@ class FlaskDataflowAnalyzer:
                 parameters.append(RouteParameter(name=name, source=source, line=line))
 
         # 1. Path parameters from URL template (<int:order_id>) matched with function arguments
-        path_vars = set(FLASK_PATH_VAR_NAME_PATTERN.findall(raw_url))
+        path_vars = {name for pair in PYTHON_PATH_VAR_NAME_PATTERN.findall(raw_url) for name in pair if name}
         if isinstance(fn_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             for arg in fn_node.args.args:
                 if arg.arg in path_vars:
                     add_param(arg.arg, "path", fn_node.lineno)
+
+        # Detect framework request objects by convention (Flask/FastAPI/Django).
+        request_names = {arg.arg for arg in getattr(getattr(fn_node, "args", None), "args", [])}
+        request_names.update({"request", "req"})
 
         # 2. Track local aliases of request containers, e.g., `data = request.get_json()` or `args = request.args`
         alias_sources: Dict[str, str] = {}
         for node in ast.walk(fn_node):
             if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
                 var_name = node.targets[0].id
-                src = self._resolve_request_container_source(node.value)
+                src = self._resolve_request_container_source(node.value, request_names)
                 if src:
                     alias_sources[var_name] = src
 
@@ -80,7 +84,7 @@ class FlaskDataflowAnalyzer:
                 if node.func.attr in ("get", "getlist") and node.args:
                     first_arg = node.args[0]
                     if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
-                        src = self._resolve_expr_source(node.func.value, alias_sources)
+                        src = self._resolve_expr_source(node.func.value, alias_sources, request_names)
                         if src:
                             add_param(first_arg.value, src, node.lineno)
 
@@ -88,25 +92,26 @@ class FlaskDataflowAnalyzer:
             elif isinstance(node, ast.Subscript):
                 key_str = self._extract_subscript_key(node.slice)
                 if key_str:
-                    src = self._resolve_expr_source(node.value, alias_sources)
+                    src = self._resolve_expr_source(node.value, alias_sources, request_names)
                     if src:
                         add_param(key_str, src, node.lineno)
 
         return parameters
 
-    def _resolve_request_container_source(self, expr: ast.AST) -> str:
+    def _resolve_request_container_source(self, expr: ast.AST, request_names: Set[str]) -> str:
         # request.get_json()
         if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Attribute):
-            if isinstance(expr.func.value, ast.Name) and expr.func.value.id == "request":
+            if isinstance(expr.func.value, ast.Name) and expr.func.value.id in request_names:
                 if expr.func.attr == "get_json":
                     return "body"
         # request.args / request.form / request.json
-        if isinstance(expr, ast.Attribute) and isinstance(expr.value, ast.Name) and expr.value.id == "request":
-            return REQUEST_ATTR_SOURCE_MAP.get(expr.attr, "")
+        if isinstance(expr, ast.Attribute) and isinstance(expr.value, ast.Name) and expr.value.id in request_names:
+            django_sources = {"GET": "query", "POST": "body", "FILES": "body", "COOKIES": "cookie", "headers": "header", "query_params": "query", "path_params": "path"}
+            return REQUEST_ATTR_SOURCE_MAP.get(expr.attr, django_sources.get(expr.attr, ""))
         return ""
 
-    def _resolve_expr_source(self, expr: ast.AST, alias_sources: Dict[str, str]) -> str:
-        direct = self._resolve_request_container_source(expr)
+    def _resolve_expr_source(self, expr: ast.AST, alias_sources: Dict[str, str], request_names: Set[str]) -> str:
+        direct = self._resolve_request_container_source(expr, request_names)
         if direct:
             return direct
         if isinstance(expr, ast.Name) and expr.id in alias_sources:

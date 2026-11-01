@@ -6,11 +6,12 @@ from app.schemas.route import NormalizedRoute
 
 # Matches Flask (<int:id>, <uuid:uid>, <name>) and Express (:id, :userId(\d+))
 STATIC_PARAM_PATTERN = re.compile(
-    r"(<(?:[a-zA-Z0-9_]+:)?[a-zA-Z0-9_]+>|:[a-zA-Z0-9_]+(?:\([^)]+\))?)"
+    r"(<(?:[a-zA-Z0-9_]+:)?[a-zA-Z0-9_]+>|\{[a-zA-Z0-9_]+(?:\:[^}]+)?\}|:[a-zA-Z0-9_]+(?:\([^)]+\))?)"
 )
 
 # Matches Flask path variable names inside angle brackets: <int:order_id> -> order_id
 FLASK_PATH_VAR_NAME_PATTERN = re.compile(r"<(?:[a-zA-Z0-9_]+:)?([a-zA-Z0-9_]+)>")
+PYTHON_PATH_VAR_NAME_PATTERN = re.compile(r"<(?:[a-zA-Z0-9_]+:)?([a-zA-Z0-9_]+)>|\{([a-zA-Z0-9_]+)(?:\:[^}]+)?\}")
 
 # Matches Express path variable names: :orderId -> orderId
 EXPRESS_PATH_VAR_NAME_PATTERN = re.compile(r":([a-zA-Z0-9_]+)")

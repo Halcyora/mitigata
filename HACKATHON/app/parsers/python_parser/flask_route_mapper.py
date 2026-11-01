@@ -1,5 +1,6 @@
 # app/parsers/python_parser/flask_route_mapper.py
 import ast
+import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 from app.normalizer.route_normalizer import join_url_paths, normalize_static_path
@@ -29,7 +30,7 @@ class FlaskRouteMapper:
         for rel_path, file_ctx in index.files.items():
             for node in ast.walk(file_ctx.tree):
                 if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
-                    if self._is_call_named(node.value, "Blueprint"):
+                    if self._is_call_named(node.value, "Blueprint") or self._is_call_named(node.value, "APIRouter"):
                         prefix = self._extract_kwarg_str(node.value, "url_prefix")
                         if prefix is None and any(
                             keyword.arg == "url_prefix" for keyword in node.value.keywords
@@ -47,7 +48,7 @@ class FlaskRouteMapper:
             for node in ast.walk(file_ctx.tree):
                 if (
                     isinstance(node, ast.Call)
-                    and self._is_method_named(node, "register_blueprint")
+                    and (self._is_method_named(node, "register_blueprint") or self._is_method_named(node, "include_router"))
                 ):
                     if not node.args:
                         continue
@@ -126,7 +127,96 @@ class FlaskRouteMapper:
                                 )
                             )
 
-        return discovered_routes
+        # FastAPI and Django route declarations share the same normalized route model.
+        discovered_routes.extend(self._extract_django_routes(index))
+        unique = {}
+        for route in discovered_routes:
+            unique[(route.raw_url, route.method, route.handler.file, route.handler.name)] = route
+        return list(unique.values())
+
+    def _extract_django_routes(self, index: PythonProjectIndex) -> List[RawFlaskRoute]:
+        """Extract Django path()/re_path() entries, including simple local include() trees."""
+        output: List[RawFlaskRoute] = []
+        route_names = {"path", "re_path"}
+        for rel_path, ctx in index.files.items():
+            functions = ctx.functions
+            for node in ast.walk(ctx.tree):
+                if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name) or node.func.id not in route_names:
+                    continue
+                if len(node.args) < 2 or not isinstance(node.args[0], ast.Constant) or not isinstance(node.args[0].value, str):
+                    continue
+                route_path = self._clean_django_path(node.args[0].value, node.func.id == "re_path")
+                view = node.args[1]
+                if isinstance(view, ast.Call) and isinstance(view.func, ast.Attribute) and view.func.attr == "as_view":
+                    view = view.func.value
+                if not isinstance(view, ast.Name) or view.id not in functions:
+                    # A route may be declared in another module; use the indexed import table.
+                    sym = index.resolve_imported_function(rel_path, self._expr_name(view))
+                else:
+                    sym = functions[view.id]
+                if sym:
+                    for method in self._django_methods(sym.node):
+                        output.append(RawFlaskRoute(route_path, normalize_static_path(route_path), method, sym))
+
+                # Expand include(module.urlpatterns) for modules represented in the project index.
+                if isinstance(view, ast.Call) and self._is_call_named(view, "include") and view.args:
+                    include_arg = view.args[0]
+                    include_name = (
+                        include_arg.value if isinstance(include_arg, ast.Constant) and isinstance(include_arg.value, str)
+                        else self._expr_name(include_arg)
+                    )
+                    target_mod = include_name
+                    if include_name in ctx.imports:
+                        imported_mod, imported_name = ctx.imports[include_name]
+                        target_mod = f"{imported_mod}.{imported_name}" if imported_name != "*" else imported_mod
+                    target_file = index._resolve_module_path(target_mod)
+                    if target_file and target_file in index.files:
+                        for child in self._extract_django_routes_for_file(index, target_file):
+                            joined = join_url_paths(route_path, child.raw_url)
+                            output.append(RawFlaskRoute(joined, normalize_static_path(joined), child.method, child.handler))
+        return output
+
+    def _extract_django_routes_for_file(self, index: PythonProjectIndex, rel_path: str) -> List[RawFlaskRoute]:
+        ctx = index.files[rel_path]
+        output: List[RawFlaskRoute] = []
+        for node in ast.walk(ctx.tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name) or node.func.id not in {"path", "re_path"}:
+                continue
+            if len(node.args) < 2 or not isinstance(node.args[0], ast.Constant) or not isinstance(node.args[0].value, str):
+                continue
+            view = node.args[1]
+            if isinstance(view, ast.Name) and view.id in ctx.functions:
+                sym = ctx.functions[view.id]
+            else:
+                sym = index.resolve_imported_function(rel_path, self._expr_name(view))
+            if sym:
+                for method in self._django_methods(sym.node):
+                    path = self._clean_django_path(node.args[0].value, node.func.id == "re_path")
+                    output.append(RawFlaskRoute(path, normalize_static_path(path), method, sym))
+        return output
+
+    @staticmethod
+    def _clean_django_path(path: str, regex: bool) -> str:
+        if not regex:
+            return path
+        path = path.strip("^").rstrip("$")
+        path = re.sub(r"\(\?P<([A-Za-z_]\w*)>[^)]+\)", r"{\1}", path)
+        path = re.sub(r"\\d\+|\[\^?[^\]]+\]\+|\([^)]*\)", "{param}", path)
+        return path
+
+    @staticmethod
+    def _expr_name(node: ast.AST) -> str:
+        if isinstance(node, ast.Name): return node.id
+        if isinstance(node, ast.Attribute): return f"{FlaskRouteMapper._expr_name(node.value)}.{node.attr}"
+        return ""
+
+    @staticmethod
+    def _django_methods(node: ast.AST) -> List[str]:
+        methods = set()
+        for child in ast.walk(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name in {"get", "post", "put", "patch", "delete", "head", "options"}:
+                methods.add(child.name.upper())
+        return sorted(methods) or ["GET", "POST"]
 
     def _parse_route_decorator(
         self,
@@ -138,7 +228,7 @@ class FlaskRouteMapper:
         attr_name = dec.func.attr
         owner_name = dec.func.value.id if isinstance(dec.func.value, ast.Name) else ""
 
-        if attr_name != "route" and attr_name not in HTTP_METHOD_SHORTHANDS:
+        if attr_name not in {"route", "api_route"} and attr_name not in HTTP_METHOD_SHORTHANDS:
             return None
 
         # Extract route path string from first positional argument or 'rule' kwarg
