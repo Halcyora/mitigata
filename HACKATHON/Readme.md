@@ -1,5 +1,5 @@
 # Mitigata — SAST/DAST Correlation Engine
-### Hackathon Problem 06 · Flagship Challenge
+### Hackathon Problem 5 · Flagship Challenge
 
 > **One pipeline. Two scanners. Every real vulnerability appears exactly once — with the line of code and live HTTP proof.**
 
@@ -7,16 +7,35 @@
 
 ## What This Is
 
-Mitigata is a hybrid **SAST + DAST correlation engine** built for Hackathon Problem 06. It scans an application's source code with Semgrep and its running version with OWASP ZAP, then deterministically links the results so each real vulnerability appears once — with both the exact file/line and proof it can be exploited at runtime.
+Mitigata is a hybrid **SAST + DAST correlation engine** built for Hackathon Problem 5. It scans an application's source code with Semgrep and its running version with OWASP ZAP, then deterministically links the results so each real vulnerability appears once — with both the exact file/line and proof it can be exploited at runtime.
 
-**Three mandatory objectives, fully implemented:**
+### Overview
+This project is an AI-driven hybrid security scanner that bridges Static Application Security Testing (SAST) and Dynamic Application Security Testing (DAST).
 
-| Objective | What it does | Key component |
-|---|---|---|
-| **01 — Scan Code & App** | Semgrep + ZAP, ≥ 4 CWE types, one common format | `UnifiedFinding` schema |
-| **02 — Correlate & Merge** | Link runtime → code via three-pass AST route mapping | `correlator.py` + route adapters |
-| **03 — Prioritise** | Confirmed / Code only / Runtime only labels, ranked | `classifier.py` + React UI |
+Traditional security scanners often generate high false-positive rates because they operate in silos. This pipeline solves that challenge by combining precise Code Intelligence (AST), Semantic Code Embeddings (GraphCodeBERT), Static Vulnerability Analysis (Semgrep), and Targeted Dynamic Fuzzing (OWASP ZAP) into a unified correlation loop. Instead of blindly scanning an application, it extracts exact route structures, maps parameter scopes, ranks risks using machine learning, and validates findings dynamically to output verified true positives.
 
+### Key Features
+```
+Advanced AST Code Intelligence: Multi-pass parser that normalizes dynamic URL patterns (converting framework-specific paths like <int:id> or :id into standardized {param} formats), extracts 1-hop callees, and tracks exact query/body parameters.
+
+- Deep SAST Sink Detection (Semgrep): Automatically scans source code for code sinks, tracks vulnerable variable IDs, and classifies vulnerabilities by CWE (e.g., SQL Injection, XSS).
+
+- Unified Route & Finding Mapping: Correlates static source code blocks, parameter scopes, and route endpoints into a single normalized route graph.
+
+- GraphCodeBERT Scoring Engine: Leverages pre-trained semantic code models to evaluate code similarity and vulnerability likelihood, assigning weighted risk priorities to findings.
+
+- Intelligent Planner: Converts raw static and scored findings into a dynamic, ranked task list to optimize validation workflows.
+
+- Split DAST Testing Passes (OWASP ZAP):
+
+        Focused Pass: Executes targeted payloads on high-risk routes, inputs, and parameters identified by the planner.
+
+        Broad Pass: Performs comprehensive surface crawling and edge-case discovery.
+
+- Multi-Signal Correlation Engine: Validates vulnerabilities by cross-referencing four distinct signals simultaneously: Route Match, Scope Match, Parameter Match, and CWE Match.
+
+- Actionable Reporting: Outputs clean, risk-prioritized vulnerability reports containing verified true positives alongside specific code fixes.
+```
 ---
 
 ## Quick Start
@@ -169,6 +188,73 @@ Full architecture diagrams: [`docs/P06-Architecture.md`](docs/P06-Architecture.m
 
 ---
 
+## Architecture Diagram
+
+```text
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                      1. TARGET APP (Flask / Juice Shop)                      │
+└──────────────────────┬───────────────────────────────┬───────────────────────┘
+                       │                               │
+                       ▼                               ▼
+    ┌──────────────────────────────────┐    ┌──────────────────────────────────┐
+    │     2. AST ENGINE (Code Intel)   │    │     3. SEMGREP SCAN (SAST)       │
+    ├──────────────────────────────────┤    ├──────────────────────────────────┤
+    │ • Pass 1: Route & Prefix (Spec)  │    │ • Deep Code Sink Detection       │
+    │ • Pass 2: 1-Hop Callees (CPG)    │    │ • CWE Classification (e.g., CWE-89)│
+    │ • Pass 3: Param Extractor (Resp) │    │ • Initial Vulnerable Variable IDs│
+    └──────────────────┬───────────────┘    └──────────────────┬───────────────┘
+                       │                                       │
+                       └───────────────┬───────────────────────┘
+                                       │
+                                       ▼
+    ┌──────────────────────────────────────────────────────────────────────────┐
+    │                     4. UNIFIED ROUTE & FINDING MAPPER                    │
+    │  • Normalizes URLs (e.g., /api/orders/{param})                           │
+    │  • Maps SAST findings and parameter scopes to specific code blocks       │
+    └─────────────────────────────────┬────────────────────────────────────────┘
+                                      │
+                                      ▼
+    ┌──────────────────────────────────────────────────────────────────────────┐
+    │                     5. GRAPHCODEBERT SCORING ENGINE                      │
+    │  • Evaluates semantic code similarity and vulnerability likelihood       │
+    │  • Assigns risk weights to prioritized findings                          │
+    └─────────────────────────────────┬────────────────────────────────────────┘
+                                      │
+                                      ▼
+    ┌──────────────────────────────────────────────────────────────────────────┐
+    │                       6. INTELLIGENT PLANNER                             │
+    │  • Generates a dynamic, ranked task list for validation & fuzzing        │
+    └─────────────────────────────────┬────────────────────────────────────────┘
+                                      │
+               ┌──────────────────────┴──────────────────────┐
+               ▼                                             ▼
+    ┌──────────────────────────────────┐    ┌──────────────────────────────────┐
+    │     7a. ZAP FOCUSED PASS         │    │     7b. ZAP BROAD PASS           │
+    ├──────────────────────────────────┤    ├──────────────────────────────────┤
+    │ • Targeted payloads on high-risk │    │ • Comprehensive app crawl        │
+    │   routes, inputs & params        │    │ • Surface discovery & edge cases │
+    └──────────┬───────────────────────┘    └──────────┬───────────────────────┘
+               │                                       │
+               └──────────────────────┬──────────────────────┘
+                                      │
+                                      ▼
+    ┌──────────────────────────────────────────────────────────────────────────┐
+    │                       8. CORRELATION ENGINE                              │
+    │  ✅ Route Match:    ZAP URL path == AST Normalized Route                 │
+    │  ✅ Scope Match:    Vulnerable file/line inside 1-hop scope              │
+    │  ✅ Param Match:    Attacked query/body param == AST extracted param     │
+    │  ✅ CWE Match:      DAST behavior aligns with SAST vulnerability type    │
+    └─────────────────────────────────┬────────────────────────────────────────┘
+                                      │
+                                      ▼
+    ┌──────────────────────────────────────────────────────────────────────────┐
+    │                       9. CLASSIFICATION & REPORT                         │
+    │  🎯 Verified True Positives  │  📊 Risk-Prioritized Findings  │  🛡️ Fixes│
+    └──────────────────────────────────────────────────────────────────────────┘
+```
+
+
+---
 ## API Reference
 
 | Endpoint | Description |
