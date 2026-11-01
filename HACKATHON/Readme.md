@@ -170,6 +170,8 @@ Full architecture diagrams: [`docs/P06-Architecture.md`](docs/P06-Architecture.m
 ---
 
 ## Architecture Diagram
+
+```mermaid
 flowchart TD
     subgraph Target ["1. Target Application"]
         direction TB
@@ -214,7 +216,7 @@ flowchart TD
     H --> I
     D --> I
     I --> J
----
+```
 
 
 
