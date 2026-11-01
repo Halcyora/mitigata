@@ -112,61 +112,58 @@ The correlation engine must:
 
 ```mermaid
 flowchart TD
-correlate with a SAST finding at the helper only if target ID, CWE, route, and
-known method/source also match. The Express adapter resolves a statically mounted
-`router.get("/orders/:id", ...)` under `app.use("/api", router)` to the same URL
-template and extracts reads such as `req.query.q`. An attack on another
-parameter, another route, a different target profile, or a SAST line outside
-those scopes stays unlinked.
+    S["SAST finding\ntarget_id + CWE + file + line"]
+    D["DAST finding\ntarget_id + CWE + URL + method + parameter"]
+    R["RouteNode index\ntarget_id + normalized URL + methods\ncode scopes + observed input parameters"]
+    TARGET{"Same target_id?"}
+    CWE{"CWE IDs equal?\n(normalised: CWE-079 == CWE-79)"}
+    ROUTE{"Normalized DAST path matches route?\nMethod matches when known?"}
+    SCOPE{"SAST file:line is within\nhandler or one-hop helper scope?"}
+    PARAM{"Attacked DAST parameter is\nread by this route?\nSource kind matches when supplied?"}
+    YES["All checks pass\nMerge once as Confirmed\nconfidence = 0.95"]
+    CORR["Corroborated\nroute + scope match\nbut parameter evidence incomplete\nconfidence = 0.70"]
+    NO["Any check fails\nDo not link this pair"]
 
-```mermaid
-flowchart LR
-    ZAP["ZAP alert\nGET /api/orders/42?q=test\nCWE-89 · parameter q"]
-    NORMAL["Normalize runtime path\n/api/orders/{param}"]
-    ROUTE["RouteNode\ntarget_id + Flask/Express mount + route\n/api/orders/{param}"]
-    SCOPE["Pass 2 scope\norders.py handler\n+ direct db.py helper"]
-    PARAM["Pass 3 input reads\nid: path\nq: query"]
-    SAST["Semgrep finding\nCWE-89 · db.py:55"]
-    CHECK{"target_id + CWE + path\n+ method/source when available\n+ SAST location in scope\n+ attacked parameter read?"}
-    CONFIRMED["Confirmed\none finding with code + runtime evidence"]
-    NO_MATCH["No merge\nfindings retain Code only / Runtime only labels"]
-
-    ZAP --> NORMAL --> CHECK
-    ROUTE --> CHECK
-    SCOPE --> CHECK
-    PARAM --> CHECK
-    SAST --> CHECK
-    CHECK -->|All checks pass| CONFIRMED
-    CHECK -->|Any check fails| NO_MATCH
+    S --> TARGET
+    D --> TARGET
+    TARGET -->|Yes| CWE
+    TARGET -->|No| NO
+    R --> ROUTE
+    CWE -->|Yes| ROUTE
+    CWE -->|No| NO
+    ROUTE -->|Yes| SCOPE
+    ROUTE -->|No| NO
+    S --> SCOPE
+    SCOPE -->|Yes| PARAM
+    SCOPE -->|No| NO
+    D --> PARAM
+    PARAM -->|"Full evidence"| YES
+    PARAM -->|"Partial evidence"| CORR
+    PARAM -->|"No evidence"| NO
 ```
 
-**Correlation gate:** `target_id`, CWE, normalized path, source scope, and
-attacked parameter are conjunctive evidence. HTTP method and parameter source
-must also match when supplied. `CodeScope` matches an exact target-relative
-file and inclusive start/end line span; it is not a heuristic substring match.
-`ParameterRead` preserves both the input name and source kind (`path`, `query`,
-`form`, `json`, or `header`). Dynamic/unknown parameter names do not act as
-wildcards. Findings and routes with different target IDs never correlate; each
-scan must use the source revision paired with its selected profile.
+**Example:** For `target_id=flask_demo`, a Flask Blueprint mounted at `/api` declares `@bp.route("/orders/<int:id>")`. The route normalises to `/api/orders/{param}`. If the handler reads query key `q` and directly calls an imported helper in `db.py`, the route node contains that parameter read and both handler/helper source scopes. A ZAP finding for `/api/orders/42?q=test` can correlate with a SAST finding at the helper only if target ID, CWE, route, and known method/source also match. The Express adapter resolves a statically mounted `router.get("/orders/:id", ...)` under `app.use("/api", router)` to the same URL template and extracts reads such as `req.query.q`.
 
 **Merge logic:**
 
 ```mermaid
 flowchart TD
-    SAST["SAST findings"]
-    DAST["DAST findings"]
+    SAST["SAST findings\n(after deduplication)"]
+    DAST["DAST findings\n(after deduplication)"]
     ROUTES["Three-pass RouteNode index"]
+    ENRICH["enrich_findings_with_ast\nset reachable flag"]
     CANDIDATE{"For each SAST/DAST candidate:\ntarget_id and CWE match?"}
-    GATE{"Normalized route + method/source when known\n+ scope + attacked parameter match?"}
-    MERGE["Merge pair\nConfirmed\nmerged_from contains both IDs"]
-    SAST_ONLY["Emit SAST as Code only"]
+    GATE{"Normalized route + method when known\n+ scope + attacked parameter match?"}
+    MERGE["Merge pair\nConfirmed (confidence=0.95)\nmerged_from contains both IDs\nconsumed_dast_ids.add(dast.id)"]
+    SAST_ONLY["Emit SAST as Code only\npreserve reachable flag"]
     LEFT["Filter DAST IDs not consumed by a merge"]
     DAST_ONLY["Emit remaining DAST as Runtime only"]
-    SORT["Sort Confirmed first,\nthen Code only, then Runtime only"]
+    SORT["Sort: Confirmed → Corroborated → Code only → Runtime only\nthen by risk_score, confidence"]
 
-    SAST --> CANDIDATE
+    SAST --> ENRICH
     DAST --> CANDIDATE
-    ROUTES --> GATE
+    ROUTES --> ENRICH
+    ENRICH --> CANDIDATE
     CANDIDATE -->|Yes| GATE
     CANDIDATE -->|No candidate| SAST_ONLY --> SORT
     GATE -->|Yes| MERGE --> LEFT
@@ -182,13 +179,25 @@ flowchart TD
 
 > Label each issue Confirmed, Code only or Runtime only, and rank confirmed issues first.
 
-| Label | Definition | Priority |
-|---|---|---|
-| **Confirmed** | Both SAST code evidence AND DAST runtime proof present | 🔴 Rank 1 — Fix immediately |
-| **Code only** | SAST finding did not pass the strict SAST/DAST correlation gate; AST reachability is retained separately | 🟡 Rank 2 — Review, may be dead code or lack matching runtime evidence |
-| **Runtime only** | DAST finding was not consumed by a confirmed SAST/DAST pair | 🟠 Rank 3 — Investigate configuration or locate code |
+| Label | Definition | Priority | Confidence |
+|---|---|---|---|
+| **Confirmed** | Both SAST code evidence AND DAST runtime proof present; all correlation checks pass | 🔴 Rank 1 — Fix immediately | 0.90–0.98 |
+| **Corroborated** | Route + scope match but parameter evidence incomplete | 🟠 Rank 2 — Investigate parameter surface | 0.70 |
+| **Code only** | SAST finding did not pass the strict correlation gate; AST reachability retained separately | 🟡 Rank 3 — Review | 0.50–0.95 |
+| **Runtime only** | DAST finding was not consumed by a confirmed pair | 🟠 Rank 4 — Investigate | 0.85 (config issues) |
 
 > **Confirmed issues must always appear first** in every view, export, and API response.
+
+**Classifier confidence values (implemented in `classifier.py`):**
+
+| Condition | Label | Confidence |
+|---|---|---|
+| `verification_label=Confirmed` AND `dual_confirmed=True` | Confirmed | 0.98 |
+| `verification_label=Confirmed` | Confirmed | 0.90 |
+| `is_config_only=True` | Runtime only | 0.85 |
+| `ast_reachable=False` | Code only | 0.95 (dead code) |
+| `ast_reachable=True` | Code only | 0.70 (reachable, probe inconclusive) |
+| `ast_reachable=None` | Code only | 0.50 (unknown) |
 
 ---
 
@@ -203,6 +212,7 @@ flowchart TD
 | Maps to business/compliance risk | ❌ | ❌ | ✅ |
 | Auto-generates verified patches | ❌ | ❌ | ✅ |
 | Each vulnerability appears once | ❌ | ❌ | ✅ |
+| Routes DAST budget to highest-risk targets | ❌ | ❌ | ✅ |
 
 ---
 
@@ -227,9 +237,12 @@ All components below are **required**. Omitting any one risks disqualification f
 - Mandatory `target_id` field (e.g., `"flask_demo"` or `"juice_shop"`) — isolates findings from different applications and revisions
 - Mandatory `cwe_id` field (e.g., `"CWE-89"`) — the shared correlation key
 - `source` field: `"sast"` or `"dast"`
-- `label` field: `"Confirmed"`, `"Code only"`, or `"Runtime only"`
+- `label` field: `"Confirmed"`, `"Corroborated"`, `"Code only"`, or `"Runtime only"`
+- Stable `id` — `uuid5` fingerprint from target + source + location + request surface
 
-**Vulnerability coverage requirement:** The normalisation pipeline must handle at minimum CWE-89 (SQLi) and CWE-79 (XSS), plus two additional CWE types from the list in §3.
+**Deduplication:** `deduplicate_findings` collapses repeated SAST reports by `target/CWE/file/line` and DAST reports by `target/CWE/rule/path/method/parameter/source`. ZAP CORS and CSP policy alerts (rules 10038, 10098) are target-wide and collapse across routes while retaining all source alert IDs in `merged_from` and combined evidence in `evidence_items`.
+
+**Vulnerability coverage requirement:** The normalisation pipeline handles CWE-89 (SQLi) and CWE-79 (XSS) as mandatory, plus CWE-78, CWE-22, CWE-601, CWE-798 from the official list, plus bonus types CWE-94, CWE-95, CWE-347, CWE-502, CWE-916.
 
 ---
 
@@ -241,26 +254,22 @@ All components below are **required**. Omitting any one risks disqualification f
 
 | Pass | Responsibility | Route node output |
 |---|---|---|
-| 1 — Route and prefix mapping | Flask decorators/Blueprint `url_prefix` or Express route declarations/`router.route()` and static `app.use()` mounts; normalize dynamic path segments | `target_id`, original path, normalized URL, methods, handler |
+| 1 — Route and prefix mapping | Flask decorators/Blueprint `url_prefix` or Express route declarations/`router.route()` and static `app.use()` mounts; normalize dynamic path segments | `target_id`, `raw_url`, `normalized_url`, methods, handler, `resolved` flag |
 | 2 — One-hop callee scopes | Resolve directly called local or imported project helpers from the handler; record exact function spans | Handler and direct-callee `CodeScope[]` |
 | 3 — Request parameter extraction | Inspect handler and one-hop helper ASTs for statically named framework-specific request reads | `ParameterRead[]` with name and source kind |
 
 **Requirements:**
 
 - Parse Flask route decorators and statically resolvable Blueprint registrations; for Express, parse `app.get/post/...`, `router.get/post/...`, `router.route()`, and static `app.use(prefix, router)` mounts.
-- Normalize Flask typed dynamic segments (for example `<int:id>`) and Express `:id` segments to a shared `{param}` URL template while preserving parameter name/source metadata.
+- Normalize Flask typed dynamic segments (e.g. `<int:id>`) and Express `:id` segments to a shared `{param}` URL template while preserving parameter name/source metadata.
 - Resolve only direct helper calls in v1; do not imply transitive reachability for a helper's callees.
 - Identify configured sink patterns and map sink locations to exact route code scopes.
 - Recognize statically named Flask reads (`request.args`, `request.form`, JSON, headers, and path arguments) and Express reads (`req.params`, `req.query`, `req.body`, and headers).
 - Output serializable `RouteNode`, `CodeScope`, and `ParameterRead` records, all carrying or belonging to a `target_id`-scoped route index.
-- Keep unresolved dynamic mounts/imports/request keys explicit and ineligible for broad matching; do not turn unresolved evidence into a wildcard.
+- Keep unresolved dynamic mounts/imports/request keys explicit (`resolved=False`) and ineligible for broad matching; do not turn unresolved evidence into a wildcard.
+- Header parameter names are compared case-insensitively; all other parameter names are case-sensitive.
 
-**Expected example:** `/api/orders/42?q=test` normalizes to
-`/api/orders/{param}`; a route reading `q` and calling a direct helper includes
-that helper's source span, allowing a `db.py:55` finding to be considered by
-the correlation gate for the same target. The Express equivalent is
-`app.use("/api", router)` plus `router.get("/orders/:id", ...)`, with
-`req.query.q` recorded as a query parameter read.
+**Expected example:** `/api/orders/42?q=test` normalises to `/api/orders/{param}`; a route reading `q` and calling a direct helper includes that helper's source span, allowing a `db.py:55` finding to be considered by the correlation gate for the same target. The Express equivalent is `app.use("/api", router)` plus `router.get("/orders/:id", ...)`, with `req.query.q` recorded as a query parameter read.
 
 > ⚠️ **Critical Constraint:** The route-to-sink mapping must be **deterministic** — no LLM guessing. Mathematical linkage must be established *before* any AI layer is invoked. This is the core of Objective 02.
 
@@ -270,7 +279,7 @@ the correlation gate for the same target. The Express equivalent is
 
 **What it does:** The heart of Objective 02. Joins SAST and DAST findings only when all required evidence agrees, merges confirmed pairs into one record, and retains unmatched findings as Code only or Runtime only.
 
-**Strict merge gate:**
+**Strict merge gate (conjunctive — all must pass):**
 
 ```mermaid
 flowchart TD
@@ -302,31 +311,26 @@ flowchart TD
     PARAM -->|No| NO
 ```
 
-Correlation requires the same `target_id`, CWE, exact DAST URL path/route
-template, SAST location in a route scope, and attacked parameter name. HTTP
-method and parameter source must match when supplied. File paths are normalized
-to target-relative paths before scope checks. A CWE match alone is never
-sufficient, and findings from different target IDs never correlate. Each scan
-must use the source revision paired with its selected profile; do not combine
-results collected against different revisions.
-A DAST finding can be consumed by at most one merged pair. When no pair passes
-the gate, preserve SAST as Code only and unconsumed DAST as Runtime only; the
-AST reachability result remains separate metadata and does not manufacture a
-DAST match.
+Correlation requires the same `target_id`, CWE, exact DAST URL path/route template, SAST location in a route scope, and attacked parameter name. HTTP method and parameter source must match when supplied. File paths are normalised to target-relative paths before scope checks. A CWE match alone is never sufficient, and findings from different target IDs never correlate. Each scan must use the source revision paired with its selected profile; do not combine results collected against different revisions. A DAST finding can be consumed by at most one SAST finding in a run. When no pair passes the gate, preserve SAST as Code only and unconsumed DAST as Runtime only; the AST reachability result remains separate metadata and does not manufacture a DAST match.
 
 **Output per merged finding:**
-- `label`: `"Confirmed"` | `"Code only"` | `"Runtime only"`
+- `label`: `"Confirmed"` | `"Corroborated"` | `"Code only"` | `"Runtime only"`
 - `target_id`: selected target profile (`"flask_demo"` or `"juice_shop"`)
 - `code_location`: `{file, line, function, sink_type}`
-- `runtime_proof`: `{url, method, parameter, http_status, response_evidence}`
+- `runtime_proof`: `{url, method, parameter, http_status, evidence}`
 - `cwe_id`: shared CWE number
 - `merged_from`: list of source finding IDs
+- `reason`: human-readable explanation of why the pair was linked or not
+- `confidence`: 0.0–1.0
+- `routes`: list of normalised route templates reached by this finding
+- `source_snippet`: ±7 lines of source context around the sink
+- `remediation`: per-CWE plain-English fix guidance
 
 ---
 
 ### 5.4 Bounded Runtime Verification Loop
 
-**What it does:** Orchestrates a stateful agent that takes unverified "Code only" findings, triggers targeted runtime verification probes against a sandboxed container, and evaluates the HTTP response — converting "Code only" to "Confirmed" when exploitation evidence is found.
+**What it does:** Orchestrates a stateful async workflow that takes unverified "Code only" findings, triggers targeted runtime verification probes against a sandboxed container, and evaluates the HTTP response — converting "Code only" to "Confirmed" when exploitation evidence is found.
 
 **State machine stages:**
 
@@ -334,26 +338,41 @@ DAST match.
 [CODE ONLY FINDING]
       │
       ▼
-[PROBE GENERATOR]  ─── Craft a safe canary HTTP request targeting the exact route
-      │
+[PROBE GENERATOR]  ─── Select safe canary payload by sink_type + variant
+      │                 e.g. ssti → "{{7*7}}", sql → "'", xss → "<svg onload=...>"
       ▼
-[RUNTIME EXECUTOR] ─── Fire probe at sandboxed Docker container
-      │
+[RUNTIME EXECUTOR] ─── httpx.AsyncClient, follow_redirects=False, trust_env=False
+      │                 2.0s hard timeout, GET/HEAD/OPTIONS/POST only
+      │                 Response capped at 500 bytes
       ▼
-[RESPONSE EVALUATOR] ── Analyse HTTP response / stack trace for exploitation evidence
+[RESPONSE EVALUATOR] ── Check EVIDENCE_SIGNALS[sink_type] in response body
+      │                  ssti: "49" (exact, not echoed template), "jinja2"
+      │                  sql: "operationalerror", "sqlite3", "syntax error"
+      │                  xss: "<svg", "<img", "onload=", "onerror="
+      │                  cmd: "canary_mitigata_2026"
+      │                  open_redirect: Location header to example.invalid
       │
-      ├─► Evidence found  ──► [CONFIRMED] ← label updated live
-      └─► No evidence     ──► [CODE ONLY] ← remains, probe was inconclusive
+      ├─► Evidence found  ──► [CONFIRMED] ← label updated, save_confirmed_result()
+      └─► No evidence     ──► [RETRY EVALUATOR] (variant 0 only, no non-retryable error)
                 │
-                └─► Retry with variant payload (conditional edge)
+                └─► [PROBE GENERATOR variant=1] ──► second attempt
+                          │
+                          ├─► Evidence found  ──► [CONFIRMED]
+                          └─► No evidence     ──► [CODE ONLY] ← probe inconclusive
 ```
 
+**Up to 4 candidates per finding:** `_verification_candidates` derives route/method/parameter probe candidates from the AST route index. Each candidate is tried in sequence; the first successful probe wins and stops iteration.
+
+**Flask 404 handler special case:** `_is_flask_not_found_handler` detects SSTI in `@app.errorhandler(404)` functions (which have no route decorator) and generates a synthetic probe at `/__mitigata_not_found__/{probe_path}`.
+
 **Constraints:**
-- All probes must be **safe, read-only canary strings** (e.g., `' OR '1'='1` for SQL detection, not `DROP TABLE`)
+- All probes must be **safe, read-only canary strings** — never `DROP TABLE`, never OS commands
 - Probes fire only on routes already flagged by SAST — no full spider/crawl
-- Each probe must complete in **< 2 seconds**
-- Probes must be restricted to the **local Docker network** — no external traffic
-- Probe results must update the finding label in real time (live UI update)
+- Each probe must complete in **< 2 seconds** (`asyncio.timeout(2.0)`)
+- Probes must be restricted to the **configured local target origin** — no external traffic, no env proxy
+- Probe results update the finding label in real time via SSE stream
+- Persisted verification results are stored in `data/raw/<target>-verification.json` and loaded on the next graph request
+- Non-probeable sinks (`hardcoded_secret`, `insecure_deserialisation`, `jwt_weak_secret`, `weak_hash`) remain `UNVERIFIED` — no safe runtime signal exists
 
 ---
 
@@ -361,15 +380,18 @@ DAST match.
 
 Every finding must be automatically classified and **ranked** by priority:
 
-| Rank | Label | Criteria | Action |
-|---|---|---|---|
-| **1** | 🔴 **Confirmed** | SAST code evidence + DAST runtime proof both present; CWE, normalized route, known method, code scope, and attacked parameter match | Immediate remediation + auto-patch |
-| **2** | 🟡 **Code only** | SAST finding did not match a DAST finding through the strict correlation gate; AST reachability is separate metadata | Review — may be unreachable or lack matching runtime evidence |
-| **3** | 🟠 **Runtime only** | DAST finding was not consumed by a confirmed pair | Investigate — likely configuration issue or code not mapped |
+| Rank | Label | Criteria | Confidence | Action |
+|---|---|---|---|---|
+| **1** | 🔴 **Confirmed** | SAST code evidence + DAST runtime proof both present; all checks pass | 0.90–0.98 | Immediate remediation + auto-patch |
+| **2** | 🟠 **Corroborated** | Route + scope match but parameter evidence incomplete | 0.70 | Investigate parameter surface |
+| **3** | 🟡 **Code only** | SAST finding did not match through the strict gate; reachability retained separately | 0.50–0.95 | Review — may be dead code or lack matching runtime evidence |
+| **4** | 🟠 **Runtime only** | DAST finding not consumed by a confirmed pair | 0.85 | Investigate — likely configuration issue or code not mapped |
 
 > **Confirmed findings must always rank first** — in the UI, in API responses, in exports.
 
 > **Target:** Engine must classify ≥ 70% of raw SAST alerts as **Code only / unreachable** in the demo repository; preserve the distinction between reachability and a strict SAST/DAST match.
+
+**Secondary sort within each label tier:** `risk_score` (0–100) derived from `severity × 0.7 + exploitability × 0.6`, then `confidence`, then `file`, then `line`.
 
 ---
 
@@ -385,13 +407,15 @@ Every finding must be automatically classified and **ranked** by priority:
 
 **UI Requirements:**
 
-- Interactive node graph (clickable nodes, zoom/pan)
-- Clicking a node expands: source code snippet, HTTP request/response evidence, CWE reference, label (Confirmed/Code only/Runtime only)
-- Split-screen layout: attack path graph (left) | code sink + HTTP trace (right)
-- Colour-coded by label (Confirmed=red, Code only=yellow, Runtime only=orange)
-- **Confirmed findings always rendered at top / highest visual prominence**
+- Interactive node graph (React Flow + ELK layered layout; clickable nodes, zoom/pan)
+- Clicking a node expands: source code snippet (±7 lines), HTTP request/response evidence, CWE reference, label, confidence %, risk score, remediation guidance
+- Split-screen layout: attack path graph (left) | finding detail (right)
+- Colour-coded by label (Confirmed=red, Code only=yellow, Runtime only/Corroborated=orange)
+- Dead-code / suppressed nodes rendered in grey (`suppressed` node type)
+- **Confirmed findings always rendered at top / highest visual prominence; animated edges**
 - Renders full attack path in **≤ 3 seconds** from page load
-- Stats bar showing: total findings · confirmed count · code-only count · runtime-only count · suppression ratio
+- Stats bar showing: total findings · confirmed · corroborated · code-only · runtime-only · suppression ratio · CWE types covered (Obj 01 proof)
+- PlannerPanel shows `ScanPlan` preview with targeted/broad task queue, reason codes, parameters, and GraphCodeBERT status
 
 ---
 
@@ -405,51 +429,103 @@ Every finding must be automatically classified and **ranked** by priority:
 [Confirmed Finding Selected]
       │
       ▼
-[Patch Generator]  ─── LLM generates a minimal, context-aware code fix
-      │
+[Patch Generator]  ─── Read ±40 lines source context around sink
+      │                 Call Sarvam GLM-5.3 (if SARVAM_API_KEY set)
+      │                 Returns unified diff (bounded, single-file, valid hunks)
+      │                 Falls back to deterministic CWE-mapped template
       ▼
 [Git Diff Preview] ─── Show unified diff before applying
-      │
+      │                 Stored in _PATCH_PREVIEWS to prevent replay
       ▼
-[Apply Patch]      ─── Write fix to source file
-      │
+[Apply Patch]      ─── apply_unified_diff() validates a/ b/ paths
+      │                 Writes to source file
+      │                 Clears verification store + graph cache
       ▼
-[Re-run DAST Probe] ── Fire same canary probe against patched container
+[Re-run DAST Probe] ── Fire same canary probe against patched target
       │
       ├─► Probe blocked  ──► ✅ "Fix Verified — Vulnerability Closed"
       └─► Probe succeeds ──► ❌ "Fix Insufficient — Re-patch Required"
 ```
 
 **Requirements:**
-- Patch must be a valid unified Git diff (`git diff` format)
+- Patch must be a valid unified Git diff (`git diff` format) — bounded, single-file, valid hunk counts
 - Fix must target the exact sink line identified by the AST mapper
+- Patch preview must match the stored preview before apply is permitted (replay protection)
 - Re-verification probe must be the same probe used in the original bounded runtime verification loop
-- Result status must update live in the UI
+- Source context sent to Sarvam may contain code; review Sarvam data-handling requirements before enabling for sensitive code
+
+**Template coverage:** `PATCH_TEMPLATES` provides deterministic patches for CWE-89, CWE-79, CWE-78, CWE-94, CWE-95, CWE-22, CWE-601, CWE-347, CWE-502, CWE-916.
 
 ---
 
 ### 5.8 Mitigata Business & Compliance Translator
 
-**What it does:** Converts confirmed technical vulnerabilities into financial risk exposure (in INR) and maps them to Indian regulatory and international compliance frameworks — directly relevant to the INC-06 credit bureau breach scenario.
+**What it does:** Converts confirmed technical vulnerabilities into financial risk exposure (in INR) and maps them to Indian regulatory and international compliance frameworks.
 
-**Financial Risk Output (per Confirmed finding):**
+**Financial Risk Output (per finding):**
 
 | Field | Description |
 |---|---|
-| `breach_probability` | Estimated likelihood of exploitation (%) |
-| `data_records_at_risk` | Estimated number of records exposed |
-| `cost_per_record_inr` | Industry benchmark cost per record (₹) |
-| `total_exposure_inr` | Calculated financial exposure (₹) |
-| `cyber_insurance_impact` | Whether this finding affects insurability or premium |
+| `breach_probability` | CRITICAL=85%, HIGH=65%, MEDIUM=40%, LOW=15% |
+| `data_records_at_risk` | Configurable via `records_at_risk` query parameter (default 10,000) |
+| `cost_per_record_inr` | ₹5,000 (IBM Cost of a Data Breach 2024, India benchmark) |
+| `total_exposure_inr` | `records × ₹5,000 × breach_probability` |
+| `cyber_insurance_impact` | `true` when `total_exposure_inr > ₹50,00,000` |
 
 **Compliance Mapping (per finding):**
 
 | Framework | Relevant Controls |
 |---|---|
-| **RBI Cyber Security Framework** | Map to applicable CSF control categories |
-| **SEBI CSCRF** | Map to applicable CSCRF requirements |
-| **ISO 27001:2022** | Map to Annex A controls (e.g., A.8.28 Secure coding) |
-| **DPDP Act 2023** | Map to applicable data protection obligations |
+| **RBI Cyber Security Framework** | Annex I §4.2 Input Validation, Annex I §4.3 IAM, Annex II Advanced Measures |
+| **SEBI CSCRF** | Domain 3: IAM, Domain 5: Application Security |
+| **ISO 27001:2022** | A.8.28 Secure coding, A.8.5 Secure authentication, A.5.17 Auth information |
+| **DPDP Act 2023** | §8(1) Reasonable safeguards, §8(2) Unauthorised access, §9 Children's data |
+
+**INC-06 Reference:**
+```
+145,000,000 records × ₹5,000/record × 0.85 (HIGH severity) = ₹61,625 crore potential exposure
+```
+
+---
+
+### 5.9 Route-Aware DAST Planner
+
+**What it does:** Before ZAP runs, the engine builds a `ScanPlan` that schedules the most relevant DAST work first within a 5-minute budget.
+
+**Planner contracts:**
+
+- `ScanPlan`: `scan_id`, `target_id`, `target_url`, `planner_version`, `rule_mapping_version`, `created_at`, `deadline_at`, `targeted_tasks[]`, `broad_tasks[]`, `unresolved_finding_ids[]`, `code_intelligence`, `intelligence_assessments`
+- `ScanTask`: `task_id`, `route_id`, `raw_url`, `normalized_url`, `method`, `phase` (TARGETED/BROAD), `priority_score`, `reason_codes`, `finding_ids`, `zap_rule_ids`, `excluded_zap_rule_ids`, `parameters`, `parameter_limitation`, `status`
+
+**Priority classes:**
+
+| Priority | Reason Codes | Description |
+|---|---|---|
+| 0 | `SAST_CWE_MATCH, ROUTE_SCOPE_MATCH, PARAMETER_SURFACE_MATCH` | Exact handler scope + supported inputs |
+| 1 | `SAST_CWE_MATCH, HELPER_SCOPE_MATCH, PARAMETER_SURFACE_MATCH` | Helper scope + supported inputs |
+| 2 | `SAST_CWE_MATCH, ROUTE_SCOPE_MATCH, INPUT_EVIDENCE_INCOMPLETE` | Matching route, no param evidence |
+| 3 | `SAST_CWE_MATCH, MULTIPLE_ROUTE_CANDIDATES, GRAPHCODEBERT_TIEBREAK` | Ambiguous; model breaks tie |
+| 4 | `BROAD_COVERAGE` | No SAST match |
+
+**Budget logic:** Targeted tasks run first (15 s ceiling each); broad fallback tasks run if budget remains (5 s ceiling each). The 5-minute window starts after target readiness and plan generation. Skipped tasks are marked `INCOMPLETE`. Coverage gaps and budget cutoff are reported explicitly.
+
+---
+
+### 5.10 Advisory GraphCodeBERT Ranking
+
+**What it does:** When `GRAPHCODEBERT_MODE=ON`, the `GraphCodeBERTShadowRanker` ranks ambiguous route/finding candidates (Priority 3 only) by cosine similarity between a finding/route query and source code context.
+
+**Constraints (non-negotiable):**
+
+- Model: `microsoft/graphcodebert-base`, pinned revision, loaded locally
+- Score calibration: `UN_CALIBRATED` — the cosine score is an uncalibrated similarity, not a vulnerability probability
+- **Advisory only** — never overrides the correlation gate
+- Never creates a route mapping, confirms a vulnerability, suppresses a finding, or bypasses the strict correlation gate
+- Only breaks ordering ties among candidates already mapped by source location
+- `GRAPHCODEBERT_MODE=OFF` (default) skips the model entirely without affecting any correlation result
+- Model status is reported separately from deterministic evidence in `code_intelligence.status`
+
+**Status values:** `SKIPPED` (mode=OFF), `AVAILABLE` (inference succeeded), `ERROR` (dependencies or inference failed — shown as `ERROR` in UI, never substituted with a synthetic score)
 
 ---
 
@@ -467,6 +543,7 @@ Violating these boundaries wastes time and **actively reduces your score**.
 | **Auth, billing, or multi-page CRUD boilerplate** | Skip login screens and settings pages; open directly into the Correlation Workbench |
 | **Generic vulnerability dashboards** | A list of CVEs without INR risk quantification and RBI/SEBI mapping scores zero on business alignment |
 | **Four separate tool outputs with no merge** | Objective 02 explicitly requires merging — each vulnerability must appear once |
+| **LLM as the correlation gate** | GraphCodeBERT is advisory for ambiguous ordering only; the deterministic gate is mandatory |
 
 ---
 
@@ -478,43 +555,37 @@ Violating these boundaries wastes time and **actively reduces your score**.
 |---|---|
 | SAST Scanner | **Semgrep** (output: SARIF or JSON) |
 | DAST Scanner | **OWASP ZAP** (output: Alerts JSON) |
-| AST Parser | **Python `ast`** module or **tree-sitter** |
-| Route Planner | Deterministic route/finding planner with `ScanPlan`, `ScanTask`, and `ScanEvent` contracts |
-| Model Ranking | **GraphCodeBERT** (mandatory ranking layer for ambiguous route/finding candidates; advisory only) |
-| Verification orchestration | **Plain asynchronous Python workflow** |
-| Containerisation | **Docker + Docker Compose** (sandboxed target + all services) |
-| Frontend Graph | Any interactive graph library (e.g., React Flow, D3.js, Cytoscape.js) |
+| AST Parser | **Python `ast`** module (Flask) / **TypeScript Compiler API** (Express) |
+| Route Planner | Deterministic route/finding planner with `ScanPlan`, `ScanTask` contracts |
+| Model Ranking | **GraphCodeBERT** (`microsoft/graphcodebert-base`, advisory only, `GRAPHCODEBERT_MODE=ON` to enable) |
+| Verification orchestration | **Plain async Python workflow** (`iter_verification_states`, `httpx`) |
+| Containerisation | **Docker + Docker Compose** (sandboxed targets + all services) |
+| Frontend Graph | **React Flow** (`@xyflow/react`) + **ELK** layered layout |
+| Patch generation | **Sarvam GLM-5.3** (optional) → deterministic CWE-mapped templates (always available) |
 | Version Control | **Git** (for diff generation and patch application) |
 
-### 7.2 Target Demo Application
+### 7.2 Target Demo Applications
 
-The demo repository must contain:
+| Profile | App | Language | Port | Role |
+|---|---|---|---|---|
+| `flask_demo` | we45/Vulnerable-Flask-App | Python / Flask | 5050 | Baseline, controlled fixtures, fast offline demo |
+| `juice_shop` | OWASP Juice Shop | JavaScript / Express | 3001 | Second-language validation on a real app |
 
+The demo repository contains:
 - At least **3 HTTP API routes** (mix of GET and POST)
-- At least **2 reachable vulnerable sinks** (Confirmed candidates): SQL injection (CWE-89) + at minimum one of: XSS (CWE-79), command injection (CWE-78), or SSTI (CWE-94)
-- At least **3 unreachable vulnerable functions** (Code only candidates — dead code never called by any route)
+- At least **2 reachable vulnerable sinks** (Confirmed candidates): SQLi (CWE-89) + SSTI (CWE-94)
+- At least **3 unreachable vulnerable functions** (`dead_code_helpers.py` — Code only candidates)
 - At least **1 runtime config issue** (Runtime only candidate): missing security header or CORS misconfiguration
 
-### 7.3 Mandatory Planner and GraphCodeBERT Gate
+### 7.3 Performance Requirements
 
-The engine must include a route-aware DAST planner before runtime scanning begins. The planner is responsible for:
-
-- mapping Semgrep findings to route and parameter evidence,
-- ranking the most relevant route + rule pairs first,
-- creating a `ScanPlan` with targeted and broad coverage phases,
-- logging reason codes and budget cutoff events,
-- and preserving the strict correlation gate.
-
-**GraphCodeBERT is advisory in this architecture.** It is used to rank ambiguous route/finding candidates and to enrich planner context, but it is not an authorization layer, a verification oracle, or a replacement for deterministic AST evidence. A model score cannot override the target, route, scope, parameter, or CWE checks required for a `Confirmed` match. `GRAPHCODEBERT_MODE=OFF` disables the feature cleanly and keeps the deterministic correlation gate intact.
-
-### 7.4 Performance Requirements
-
-| Operation | Maximum Allowed Time |
-|---|---|
-| Full ingestion + correlation graph build | ≤ 10 seconds |
-| Single verification probe | ≤ 2 seconds |
-| UI attack path render | ≤ 3 seconds |
-| Patch generation + re-verification | ≤ 15 seconds |
+| Operation | Maximum Allowed Time | Implemented |
+|---|---|---|
+| Full ingestion + correlation graph build | ≤ 10 seconds | `asyncio.timeout` + 10 s TTL cache |
+| Single verification probe | ≤ 2 seconds | `asyncio.timeout(2.0)` + `httpx.Timeout(2.0)` |
+| UI attack path render | ≤ 3 seconds | Pre-computed ELK seed positions |
+| Patch generation + re-verification | ≤ 15 seconds | 10 s Sarvam timeout + < 1 s template |
+| ZAP DAST budget | ≤ 5 minutes | Targeted 15 s / broad 5 s per task |
 
 ---
 
@@ -528,7 +599,7 @@ The engine must include a route-aware DAST planner before runtime scanning begin
 
 | Score Band | Description |
 |---|---|
-| **29–30 pts** | Deterministic three-pass route mapping with CWE, normalized route, code-scope, and parameter checks; each vulnerability appears exactly once; zero guessed correlations |
+| **29–30 pts** | Deterministic three-pass route mapping with CWE, normalised route, code-scope, and parameter checks; each vulnerability appears exactly once; zero guessed correlations |
 | **20–28 pts** | Partial AST mapping or incomplete evidence gates; minor false correlations or duplicate findings |
 | **10–19 pts** | Fuzzy string matching or pure LLM correlation without AST; duplicates present |
 | **0–9 pts** | No correlation mechanism; separate tool outputs with no merge |
@@ -599,33 +670,40 @@ All steps visible and functional in a single live demo flow.
 
 ---
 
-## 9. 3-Label Prioritised Classification System
+## 9. 3-Tier Alert Classification System
 
 ```mermaid
 flowchart TD
-    SAST["SAST findings"]
-    DAST["DAST findings"]
+    SAST["SAST findings\n(deduplicated)"]
+    DAST["DAST findings\n(deduplicated)"]
     ROUTES["Three-pass AST route index"]
-    GATE{"target_id + CWE + normalized route\n+ method/source when known\n+ SAST code scope + attacked parameter"}
-    CONFIRMED["Confirmed\nRank 1\nAll evidence linked"]
-    CODE["Code only\nRank 2\nSAST unmatched; retain AST reachability"]
+    ENRICH["enrich_findings_with_ast\nset reachable flag"]
+    GATE{"target_id + CWE + normalised route\n+ method/source when known\n+ SAST code scope + attacked parameter"}
+    CONFIRMED["Confirmed\nRank 1\nAll evidence linked\nconfidence 0.90–0.98"]
+    CORROBORATED["Corroborated\nRank 2\nRoute+scope match\npartial parameter evidence\nconfidence 0.70"]
+    CODE["Code only\nRank 3\nSAST unmatched; retain AST reachability\nconfidence 0.50–0.95"]
     REMAINING["Unconsumed DAST IDs"]
-    RUNTIME["Runtime only\nRank 3"]
-    PROBE{"Optional live verification\nfor eligible Code only finding"}
-    VERIFIED["Probe evidence found\nupgrade to Confirmed with probe evidence"]
-    SORT["Prioritised output\nConfirmed → Code only → Runtime only"]
+    RUNTIME["Runtime only\nRank 4\nconfidence 0.85 (config issues)"]
+    PROBE{"Optional live verification\nfor eligible Code only finding\n(probeable sink type + resolved route)"}
+    VERIFIED["Probe evidence found\nupgrade to Confirmed\nconfidence 0.90\nsave_confirmed_result()"]
+    SORT["Prioritised output\nConfirmed → Corroborated → Code only → Runtime only\nthen risk_score, confidence"]
 
-    SAST --> GATE
+    SAST --> ENRICH
     DAST --> GATE
-    ROUTES --> GATE
+    ROUTES --> ENRICH
+    ENRICH --> GATE
     GATE -->|All checks pass| CONFIRMED
+    GATE -->|Partial evidence| CORROBORATED
     GATE -->|Any check fails| CODE
     CODE --> PROBE
     PROBE -->|Verified| VERIFIED --> SORT
-    PROBE -->|Not verified or not needed| SORT
+    PROBE -->|Not verified or not probeable| SORT
     CODE --> SORT
+    CONFIRMED --> SORT
+    CORROBORATED --> SORT
     DAST --> REMAINING
-    CONFIRMED --> REMAINING
+    CONFIRMED -.->|consumed_dast_ids| REMAINING
+    CORROBORATED -.->|consumed_dast_ids| REMAINING
     REMAINING --> RUNTIME --> SORT
 ```
 
@@ -640,9 +718,9 @@ Applicable to banks, NBFCs, and payment system operators regulated by the Reserv
 
 | Finding Type | RBI CSF Control Area |
 |---|---|
-| SQL Injection (CWE-89) | Annex I — Baseline Cyber Security Controls |
-| XSS (CWE-79) | Annex I — Baseline Cyber Security Controls |
-| Broken Authentication | Annex II — Advanced Measures |
+| SQL Injection (CWE-89) | Annex I §4.2 — Input Validation |
+| XSS (CWE-79) | Annex I §4.2 — Input Validation |
+| Broken Authentication | Annex I §4.3 — IAM; Annex II — Advanced Measures |
 | Sensitive Data Exposure | Circular on Customer Data Protection |
 | Missing Security Headers | Network & Application Security |
 
@@ -651,8 +729,8 @@ Applicable to stock brokers, depositories, asset management companies, and marke
 
 | Finding Type | SEBI CSCRF Domain |
 |---|---|
-| Input Validation Flaws (SQLi, XSS) | Application Security |
-| Authentication Weaknesses | Identity & Access Management |
+| Input Validation Flaws (SQLi, XSS) | Domain 5: Application Security |
+| Authentication Weaknesses | Domain 3: IAM |
 | Data Exposure | Data Security & Privacy |
 | Runtime Misconfigurations | Security Configuration Management |
 
@@ -662,12 +740,11 @@ Applicable to stock brokers, depositories, asset management companies, and marke
 |---|---|
 | SQL Injection (CWE-89) | A.8.28 — Secure coding |
 | XSS (CWE-79) | A.8.28 — Secure coding |
-| Broken Auth | A.8.5 — Secure authentication |
+| Broken Auth | A.8.5 — Secure authentication; A.5.17 — Auth information |
 | Sensitive Data Exposure | A.8.10 — Information deletion / A.8.11 — Data masking |
-| Missing Headers | A.8.23 — Web filtering / A.8.20 — Networks security |
+| Missing Headers | A.8.23 — Web filtering / A.8.20 — Network security |
 
 #### DPDP Act 2023 (India's Digital Personal Data Protection Act)
-India's primary data protection legislation — in force since 2023.
 
 | Finding Type | DPDP Act 2023 Obligation |
 |---|---|
@@ -679,22 +756,23 @@ India's primary data protection legislation — in force since 2023.
 ### 10.2 Financial Risk Quantification Formula
 
 ```
-Total Exposure (INR) = Records at Risk × Cost per Record (INR) × Breach Probability (%)
+Total Exposure (INR) = Records at Risk × ₹5,000/record × Breach Probability
 
 Where:
-  - Records at Risk     = Estimated from endpoint sensitivity and data access patterns
-  - Cost per Record     = ₹3,500–₹7,000 (Indian benchmark, IBM Cost of a Data Breach 2024)
-  - Breach Probability  = Derived from CVSS score + label tier (Confirmed = highest)
+  Records at Risk     = configurable (default 10,000; max 100,000,000)
+  Cost per Record     = ₹5,000 (IBM Cost of a Data Breach 2024, India benchmark)
+  Breach Probability  = CRITICAL=85%, HIGH=65%, MEDIUM=40%, LOW=15%
+  Cyber Insurance     = true when Total Exposure > ₹50,00,000
 
 INC-06 Reference:
-  - 145 million records × ₹5,000/record × 0.85 (HIGH severity) = ₹61,625 crore potential exposure
+  145,000,000 records × ₹5,000/record × 0.85 = ₹61,625 crore potential exposure
 ```
 
 ---
 
 ## 11. Containerisation Requirements
 
-> **Current repo pattern:** Docker is used for the pinned targets and scanner isolation, while the engine and UI can run either in Docker or via the host-mode launcher. The local Python path is deliberately supported because the engine can run on the host when Docker image rebuilds are not available. One-command startup remains convenient, but it is not the only supported flow.
+> **Current repo pattern:** Docker is used for the pinned targets and scanner isolation, while the engine and UI can run either in Docker or via the host-mode launcher (`scripts/start_local_engine.ps1`). One-command startup is the primary demo flow.
 
 ### 11.1 Required Container Architecture
 
@@ -706,10 +784,10 @@ Must start all of the following services:
 
 | Container | Purpose | Network |
 |---|---|---|
-| `flask-target` | we45 Flask reference target (`flask_demo` profile) | `internal` only |
-| `juice-shop` | OWASP Juice Shop Express/Node.js target (`juice_shop` profile) | `internal` only |
-| `engine` | FastAPI correlation engine; selects a target profile for scans, route extraction, correlation, and probes | `internal` + `public` |
-| `frontend` | React UI (Correlation Workbench) | `public` only |
+| `mitigata-target-flask` | we45 Flask reference target (`flask_demo` profile) | `internal` only |
+| `mitigata-target-juice-shop` | OWASP Juice Shop Express/Node.js target (`juice_shop` profile) | `internal` only |
+| `mitigata-engine` | FastAPI correlation engine; selects target profile for scans, route extraction, correlation, and probes | `internal` + `public` |
+| `mitigata-frontend` | React UI (Correlation Workbench) | `public` only |
 
 ### 11.2 Network Isolation Requirements
 
@@ -723,18 +801,18 @@ networks:
 - Neither target app container may be directly accessible from the host machine
 - Both targets are isolated on the internal network; the engine contacts only the configured target for the selected profile
 - All verification probes must route through the `internal` Docker network
-- This enforces the "no external traffic from probes" constraint
+- The engine uses only the configured `origin` from `configs/<target_id>.yaml` — never a URL from the finding itself
 
 ### 11.3 Volume Mount Strategy
 
 ```yaml
 volumes:
-  - ./targets/vulnerable_flask:/target-src/flask_demo:ro
-  - ./targets/juice-shop:/target-src/juice_shop:ro
-  - ./data:/app/data               # pre-seeded scan results
+  - ./targets:/targets:ro        # read-only source for both adapters
+  - ./configs:/app/configs:ro    # target profiles
+  - ./data:/app/data             # raw scan output + verification results
 ```
 
-The selected adapter must read the **exact same source revision** that is running in its target container. Profile-specific read-only mounts, scan fixtures, and ground-truth manifests must stay paired; source paths are normalized to target-relative paths before correlation.
+The selected adapter must read the **exact same source revision** that is running in its target container. Profile-specific read-only mounts, scan fixtures, and ground-truth manifests must stay paired; source paths are normalised to target-relative paths before correlation.
 
 ### 11.4 Health Check Requirements
 
@@ -748,15 +826,15 @@ healthcheck:
   retries: 3
 ```
 
-Engine must wait for the selected target's health check before running its scans or verification probes (`depends_on: condition: service_healthy`). Both services may start at compose-up, but unselected profile data must not be mixed into the active scan.
+Engine must wait for the selected target's health check before running scans or verification probes (`depends_on: condition: service_healthy`).
 
 ### 11.5 One-Command Startup Verification
 
 The following sequence must work on a fresh machine with Docker installed:
 
 ```bash
-git clone <repo>
-cd mitigata-p06
+git clone https://github.com/Halcyora/mitigata.git
+cd mitigata/HACKATHON
 cp .env.example .env
 docker compose up --build
 # → http://localhost:3000 opens Correlation Workbench
@@ -772,9 +850,9 @@ docker compose up --build
 ```
 Step 1 [0:00–0:30]  Open Correlation Workbench directly (no login screen)
                     Show: "docker compose up --build" result — all containers healthy
-                    Show: Select `flask_demo` or `juice_shop`; display the active target_id
+                    Show: Select flask_demo or juice_shop; display the active target_id
                     Show: Unified Semgrep + ZAP ingestion with target_id and CWE numbers
-                    Show: Target-scoped stats — total · confirmed · code only · runtime only
+                    Show: Target-scoped stats — total · confirmed · code only · runtime only · suppression ratio
 
 Step 2 [0:30–1:30]  Navigate the Correlation Graph (Objective 02)
                     Show: HTTP endpoint → controller → sink → HTTP proof (split-screen)
@@ -782,6 +860,7 @@ Step 2 [0:30–1:30]  Navigate the Correlation Graph (Objective 02)
                     Show: Express route/prefix and request parameter mapping on Juice Shop
                     Show: Switching target changes graph and stats; no cross-target links
                     Show: Code-only alerts suppressed (70%+ noise reduction visible)
+                    Show: PlannerPanel — targeted task queue, reason codes, GraphCodeBERT status
                     Say: "Deterministic AST linkage — exact file and line, not LLM guessing"
 
 Step 3 [1:30–2:30]  Live Runtime Verification — label flip (Objective 02 + 03)
@@ -824,29 +903,37 @@ A submission is considered complete when **all** of the following are true:
 - [ ] At least 4 of 6 vulnerability types covered (CWE-89 and CWE-79 mandatory)
 - [ ] Flask and Express/Node.js adapters emit the same `RouteNode`, `CodeScope`, and `ParameterRead` schema
 - [ ] All findings in one common `UnifiedFinding` schema with `target_id` and `cwe_id` fields
+- [ ] Stable finding IDs (uuid5 fingerprints) consistent across API calls
 - [ ] Flask and Juice Shop use separate profiles, source revisions, fixtures, and ground-truth reports
 
 ### Objective 02 — Correlate and Merge
 - [ ] AST call graph built deterministically from source code
 - [ ] Every HTTP route mapped to its downstream sinks
 - [ ] Express static `app.use()` prefixes, route declarations, and supported request parameter sources are covered by adapter tests
-- [ ] SAST and DAST findings joined only when target_id + CWE + normalized route + code scope + attacked parameter match; method/source must match when known
+- [ ] SAST and DAST findings joined only when `target_id` + CWE + normalised route + code scope + attacked parameter match; method/source must match when known
 - [ ] A regression test proves same-route/CWE findings from different target IDs never correlate
 - [ ] Each real vulnerability appears exactly once in output
 - [ ] Each finding has `code_location` (file + line) AND/OR `runtime_proof` (URL + evidence)
-- [ ] Runtime verification workflow fires targeted probes and updates finding label
+- [ ] `deduplicate_findings` collapses repeated scanner reports before correlation
+- [ ] Runtime verification workflow fires targeted probes and updates finding label via SSE
+- [ ] Persisted verification results survive across graph cache invalidations
+- [ ] DAST planner produces `ScanPlan` with targeted + broad tasks and reason codes
+- [ ] `GET /api/scans/compare` reports new / fixed / still-open findings across consecutive scans
 
 ### Objective 03 — Prioritise What to Fix
-- [ ] All findings labelled: Confirmed / Code only / Runtime only
+- [ ] All findings labelled: Confirmed / Corroborated / Code only / Runtime only
 - [ ] Confirmed findings always ranked first in UI and API responses
 - [ ] ≥ 70% of raw SAST alerts classified as Code only / unreachable, with reachability reported separately from correlation
 - [ ] Git diff patch generated for at least one Confirmed finding
 - [ ] Re-verification probe confirms patch closes the vulnerability
+- [ ] Per-CWE remediation guidance shown on every finding
+- [ ] SARIF export available; `fail_on_confirmed_high=true` returns HTTP 409 for CI gates
 
 ### Business & Compliance
-- [ ] INR financial risk calculated for all Confirmed findings
-- [ ] RBI CSF, SEBI CSCRF, ISO 27001, and DPDP 2023 controls mapped for all Confirmed findings
+- [ ] INR financial risk calculated for all findings
+- [ ] RBI CSF, SEBI CSCRF, ISO 27001, and DPDP 2023 controls mapped for all findings
 - [ ] Cyber insurance impact flag present
+- [ ] INC-06 breach scenario referenced in the business risk panel
 
 ### Containerisation
 - [ ] `docker compose up --build` starts all services without errors
@@ -864,8 +951,9 @@ A submission is considered complete when **all** of the following are true:
 - [ ] No hardcoded secrets or API keys
 - [ ] No dead code or debug artifacts
 - [ ] README with setup instructions and architecture diagram
+- [ ] 14 test modules passing
 
 ---
 
-*Document version: 2.0 — Mitigata Hackathon Problem 06 (Flagship)*  
-*Updated: Aligned with official Problem 06 statement — three mandatory objectives; 3-label classification (Confirmed/Code only/Runtime only); containerisation requirements; INC-06 reference; DPDP Act 2023 added*
+*Document version: 3.0 — Mitigata Hackathon Problem 06 (Flagship)*
+*Updated: Aligned with implemented engine state — Corroborated label, stable finding IDs, deduplication, incremental correlation, scan manager, SARIF export, scan comparison, DAST planner, advisory GraphCodeBERT, PlannerPanel UI, per-CWE remediation, patch replay protection, Flask 404 handler special case*
