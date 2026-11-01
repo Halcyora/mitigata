@@ -13,6 +13,7 @@ class ProbeRecord(TypedDict, total=False):
     status: int
     response_preview: str
     error: str
+    location: str
 
 
 class AlertState(TypedDict):
@@ -27,6 +28,7 @@ class AlertState(TypedDict):
     probe_variant: int
     http_status: int | None
     http_response: str | None
+    http_location: str | None
     evidence: str | None
     label: VerificationLabel
     error: str | None
@@ -62,6 +64,7 @@ def new_alert_state(
         "probe_variant": 0,
         "http_status": None,
         "http_response": None,
+        "http_location": None,
         "evidence": None,
         "label": "Code only",
         "error": None,

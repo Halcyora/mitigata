@@ -33,13 +33,17 @@ SINK_TYPE_MAP = {
     "CWE-89": "sql_injection",
     "CWE-78": "command_injection",
     "CWE-94": "ssti",
+    "CWE-96": "ssti",
     "CWE-95": "eval_injection",
     "CWE-347": "jwt_weak_secret",
     "CWE-502": "insecure_deserialisation",
     "CWE-798": "hardcoded_secret",
     "CWE-916": "weak_hash",
     "CWE-79": "xss",
+    "CWE-601": "open_redirect",
     "CWE-200": "information_disclosure",
+    "CWE-327": "weak_crypto",
+    "CWE-704": "unsafe_type_conversion",
 }
 
 _CWE_PATTERN = re.compile(r"CWE-\s*(\d+)", re.IGNORECASE)
@@ -179,15 +183,29 @@ def parse_semgrep_json(
         cwe_id = _extract_cwe(metadata.get("cwe"), rule_id)
         raw_severity = extra.get("severity") or metadata.get("severity") or "WARNING"
         severity = str(raw_severity).upper()
+        normalized_path = normalize_finding_path(result_path, target_id, source_root)
+        raw_lines = extra.get("lines") or ""
+        raw_message = extra.get("message") or ""
+        sast_evidence = str(raw_message)[:500] if raw_message else ""
+        sast_snippet = str(raw_lines)[:1000] if raw_lines else ""
 
         findings.append(
             UnifiedFinding(
                 target_id=target_id,
                 source="sast",
                 cwe_id=cwe_id,
-                file=normalize_finding_path(result_path, target_id, source_root),
+                file=normalized_path,
                 line=line,
                 rule_id=rule_id,
+                evidence_items=[{
+                    "source": "SAST",
+                    "rule_id": rule_id,
+                    "file": normalized_path,
+                    "line": line,
+                    "severity": severity,
+                    "evidence": sast_evidence,
+                    "snippet": sast_snippet,
+                }],
                 severity=severity,
                 sink_type=SINK_TYPE_MAP.get(cwe_id, "unknown"),
                 label="Code only",

@@ -81,7 +81,20 @@ def parse_zap_json(path: str | Path, target_id: str) -> list[UnifiedFinding]:
         cwe_id = _cwe_id(alert.get("cweid"))
         raw_evidence = alert.get("evidence", "")
         evidence = str(raw_evidence)[:500] if raw_evidence is not None else ""
+        raw_payload = alert.get("payload") or alert.get("attack")
+        payload = str(raw_payload)[:1000] if raw_payload is not None else None
         param_type = str(alert.get("paramType") or "").upper()
+        alert_id = str(alert.get("pluginId") or alert.get("alertRef") or "") or None
+        evidence_item = {
+            "source": "DAST",
+            "alert_id": alert_id,
+            "url": alert.get("url"),
+            "method": alert.get("method"),
+            "parameter": alert.get("param") or None,
+            "payload": payload,
+            "http_status": alert.get("statusCode"),
+            "evidence": evidence,
+        }
         findings.append(
             UnifiedFinding(
                 target_id=target_id,
@@ -91,12 +104,12 @@ def parse_zap_json(path: str | Path, target_id: str) -> list[UnifiedFinding]:
                 method=alert.get("method"),
                 parameter=alert.get("param") or None,
                 parameter_source=ZAP_PARAM_SOURCE_MAP.get(param_type),
+                payload=payload,
                 evidence=evidence,
+                evidence_items=[evidence_item],
                 http_status=alert.get("statusCode"),
                 rule_id=(
-                    str(alert.get("pluginId") or alert.get("alertRef"))
-                    if alert.get("pluginId") or alert.get("alertRef")
-                    else None
+                    alert_id
                 ),
                 severity=_severity(alert),
                 sink_type=ZAP_SINK_MAP.get(cwe_id.removeprefix("CWE-"), "unknown"),

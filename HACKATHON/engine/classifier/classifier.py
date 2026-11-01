@@ -31,7 +31,7 @@ class ClassificationResult:
 
 def classify(
     ast_reachable: bool | None,
-    langgraph_label: VerificationLabel | None,
+    verification_label: VerificationLabel | None,
     is_config_only: bool,
     dual_confirmed: bool = False,
 ) -> ClassificationResult:
@@ -42,7 +42,7 @@ def classify(
         raise ClassificationError("is_config_only must be a bool")
     if not isinstance(dual_confirmed, bool):
         raise ClassificationError("dual_confirmed must be a bool")
-    if langgraph_label not in {
+    if verification_label not in {
         None,
         "Confirmed",
         "Code only",
@@ -50,10 +50,10 @@ def classify(
         "UNVERIFIED",
     }:
         raise ClassificationError(
-            f"Unsupported verification label: {langgraph_label!r}"
+            f"Unsupported verification label: {verification_label!r}"
         )
 
-    if langgraph_label == "Confirmed" and dual_confirmed:
+    if verification_label == "Confirmed" and dual_confirmed:
         return ClassificationResult(
             label=Label.CONFIRMED,
             confidence=0.98,
@@ -61,7 +61,7 @@ def classify(
                 "SAST sink and DAST probe both confirmed; CWE and route both match."
             ),
         )
-    if langgraph_label == "Confirmed":
+    if verification_label == "Confirmed":
         return ClassificationResult(
             label=Label.CONFIRMED,
             confidence=0.90,
@@ -104,14 +104,14 @@ def classify(
 def apply_classification(
     finding: UnifiedFinding,
     *,
-    langgraph_label: VerificationLabel | None = None,
+    verification_label: VerificationLabel | None = None,
     is_config_only: bool = False,
     dual_confirmed: bool = False,
 ) -> UnifiedFinding:
     """Return a finding with Phase 5 label/confidence while preserving its evidence."""
     result = classify(
         ast_reachable=finding.reachable,
-        langgraph_label=langgraph_label,
+        verification_label=verification_label,
         is_config_only=is_config_only,
         dual_confirmed=dual_confirmed,
     )
@@ -120,8 +120,33 @@ def apply_classification(
     )
 
 
+def calculate_issue_risk_score(finding: UnifiedFinding) -> int:
+    """Return a transparent 0-100 prioritization score from severity and exploitability."""
+    severity_score = {
+        "CRITICAL": 100,
+        "HIGH": 80,
+        "MEDIUM": 60,
+        "LOW": 35,
+        "INFO": 15,
+    }.get(finding.severity.upper(), 45)
+    exploitability = 0
+    if finding.label == "Confirmed":
+        exploitability += 20
+    elif finding.label == "Corroborated":
+        exploitability += 10
+    elif finding.label == "Runtime only":
+        exploitability += 15
+    if finding.reachable:
+        exploitability += 10
+    if finding.parameter or finding.parameter_source:
+        exploitability += 10
+    if finding.evidence or finding.evidence_items:
+        exploitability += 10
+    return min(100, round(severity_score * 0.7 + min(exploitability, 50) * 0.6))
+
+
 def sort_findings(findings: Iterable[UnifiedFinding]) -> list[UnifiedFinding]:
-    """Return findings in classifier priority order, preserving ties."""
+    """Prioritize correlation state, then severity/exploitability risk and confidence."""
     priority = {
         "Confirmed": 0,
         "Corroborated": 1,
@@ -130,5 +155,12 @@ def sort_findings(findings: Iterable[UnifiedFinding]) -> list[UnifiedFinding]:
     }
     return sorted(
         findings,
-        key=lambda finding: priority.get(finding.label or "Code only", 2),
+        key=lambda finding: (
+            priority.get(finding.label or "Code only", 2),
+            -calculate_issue_risk_score(finding),
+            -(finding.confidence or 0.0),
+            finding.file or "",
+            finding.line or 0,
+            finding.id,
+        ),
     )

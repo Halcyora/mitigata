@@ -163,7 +163,7 @@ class IncrementalCorrelator:
                     "parameter/source."
                     if level == "Confirmed"
                     else "Matched target, CWE, route, method, and code scope; "
-                    "request input evidence is incomplete or unavailable."
+                    "request input evidence is incomplete or ambiguous."
                 ),
                 "routes": list(
                     dict.fromkeys(

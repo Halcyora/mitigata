@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   fetchLatestScan,
   fetchPlanner,
+  fetchScanComparison,
   graphQueryKey,
   scanJobQueryKey,
   startScan,
@@ -30,6 +31,10 @@ export function PlannerPanel({ targetId }: { targetId: TargetId }) {
     queryFn: () => fetchLatestScan(targetId),
     refetchInterval: (query) => (isActive(query.state.data) ? 1000 : false),
   });
+  const comparisonQuery = useQuery({
+    queryKey: ["scan-comparison", targetId],
+    queryFn: () => fetchScanComparison(targetId),
+  });
   const startMutation = useMutation({
     mutationFn: (scanType: "sast" | "dast") => startScan(targetId, scanType),
     onSuccess: (job) => {
@@ -53,6 +58,7 @@ export function PlannerPanel({ targetId }: { targetId: TargetId }) {
     refreshedJobId.current = job.job_id;
     void queryClient.invalidateQueries({ queryKey: graphQueryKey(targetId) });
     void queryClient.invalidateQueries({ queryKey: ["planner", targetId] });
+    void queryClient.invalidateQueries({ queryKey: ["scan-comparison", targetId] });
   }, [job, queryClient, targetId]);
 
   if (planQuery.isPending) {
@@ -73,6 +79,7 @@ export function PlannerPanel({ targetId }: { targetId: TargetId }) {
       </div>
 
       <p>{plan.targeted_tasks.length} targeted · {plan.broad_tasks.length} broad fallback · {plan.unresolved_finding_ids.length} unresolved findings</p>
+      <p>Bounded runtime verification is available for source findings. GraphCodeBERT ranks ambiguous route candidates for scan planning only; its score is advisory.</p>
       <p>GraphCodeBERT: {plan.code_intelligence.status} ({plan.code_intelligence.mode}) · {plan.code_intelligence.model_id}</p>
       <p>Model revision: {plan.code_intelligence.model_revision} · {plan.code_intelligence.preprocessor_version}</p>
       {plan.code_intelligence.status_detail && <p>{plan.code_intelligence.status_detail}</p>}
@@ -139,6 +146,17 @@ export function PlannerPanel({ targetId }: { targetId: TargetId }) {
           <span>PLANNED · priority {task.priority_score}</span>
           <small>{task.reason_codes.join(" · ")}</small>
         </article>)}
+      </div>
+      <div className="scan-comparison">
+        <h3>Scan comparison</h3>
+        {comparisonQuery.isPending ? <p>Loading scan history…</p> : comparisonQuery.isError ? <p className="error-copy">{comparisonQuery.error.message}</p> : !comparisonQuery.data.available ? <p>{comparisonQuery.data.reason}</p> : <>
+          <p>Comparing {comparisonQuery.data.previous?.scan_type?.toUpperCase()} with {comparisonQuery.data.current?.scan_type?.toUpperCase()}.</p>
+          <div className="comparison-counts"><span><strong>{comparisonQuery.data.new?.length ?? 0}</strong> new</span><span><strong>{comparisonQuery.data.fixed?.length ?? 0}</strong> fixed</span><span><strong>{comparisonQuery.data.still_open?.length ?? 0}</strong> still open</span></div>
+          {["new", "fixed", "still_open"].map((kind) => {
+            const rows = comparisonQuery.data[kind as "new" | "fixed" | "still_open"] ?? [];
+            return rows.length > 0 ? <details key={kind}><summary>{kind.replace("_", " ")} ({rows.length})</summary><ul>{rows.slice(0, 10).map((row, index) => <li key={`${String(row.key)}-${index}`}>{String(row.cwe ?? "Finding")} · {String(row.file ? `${row.file}:${row.line ?? ""}` : `${row.method ?? ""} ${row.url ?? ""}`)}</li>)}</ul></details> : null;
+          })}
+        </>}
       </div>
     </section>
   );

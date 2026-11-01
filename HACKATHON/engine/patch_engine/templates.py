@@ -58,6 +58,20 @@ value = parse_allowed_expression(user_input)
 payload = json.loads(data)
 session = SessionSchema.model_validate(payload)
 """,
+    "hardcoded_secret": """\
+# Hard-coded secret — load it from a secret manager or environment configuration.
+# Rotate the exposed credential; removing it from source does not revoke it.
+secret = os.environ["SERVICE_SECRET"]
+""",
+    "weak_crypto": """\
+# Risky cryptography — replace obsolete algorithms with a current, vetted
+# algorithm from a maintained cryptography library; preserve compatibility only
+# through an explicit migration plan.
+""",
+    "unsafe_type_conversion": """\
+# Unsafe conversion — validate the input type and allowed range at the boundary,
+# then use an explicit conversion and handle conversion errors.
+""",
 }
 
 _CWE_TO_SINK: Final[dict[str, str]] = {
@@ -69,6 +83,9 @@ _CWE_TO_SINK: Final[dict[str, str]] = {
     "CWE-94": "ssti",
     "CWE-95": "eval_injection",
     "CWE-502": "insecure_deserialisation",
+    "CWE-798": "hardcoded_secret",
+    "CWE-327": "weak_crypto",
+    "CWE-704": "unsafe_type_conversion",
 }
 
 
@@ -77,14 +94,26 @@ def get_template_patch(sink_type: str) -> str | None:
     return PATCH_TEMPLATES.get(sink_type)
 
 
-def default_fix_template(cwe_id: str) -> str:
-    """Return a deterministic remediation hint, falling back for unknown CWEs."""
+def resolve_sink_type(sink_type: str, cwe_id: str | None) -> str:
+    """Use the explicit sink when supported; otherwise infer only exact CWE mappings."""
+    if sink_type in PATCH_TEMPLATES:
+        return sink_type
+    normalized = (cwe_id or "").strip().upper()
+    return _CWE_TO_SINK.get(normalized, sink_type)
+
+
+def default_fix_template(cwe_id: str, sink_type: str | None = None) -> str:
+    """Return deterministic remediation guidance, including unknown classifications."""
     normalized = cwe_id.strip().upper()
-    sink_type = _CWE_TO_SINK.get(normalized)
-    if sink_type is None:
+    mapped_sink = _CWE_TO_SINK.get(normalized)
+    if mapped_sink is None:
+        classification = f"scanner sink '{sink_type or 'unknown'}'"
         return (
-            f"Review the sink for {normalized or 'the reported CWE'}; validate and "
-            "constrain untrusted input at the sink using the relevant library's "
-            "documented safe API."
+            f"Review {normalized or 'the reported weakness'} ({classification}) "
+            "against the scanner rule "
+            "description and affected source. Apply the documented mitigation for "
+            "that weakness, preserve intended behavior, and verify the change with "
+            "a focused regression check. No automated code diff is available for "
+            "this classification."
         )
-    return PATCH_TEMPLATES[sink_type]
+    return PATCH_TEMPLATES[mapped_sink]

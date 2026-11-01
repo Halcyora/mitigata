@@ -19,6 +19,7 @@ RUN --mount=type=secret,id=custom_ca,required=false \
 
 COPY engine /app/engine
 COPY app /app/app
+COPY scripts /app/scripts
 
 # Cache the exact model revision into the image so scans run locally and do not
 # spend their five-minute DAST budget downloading model weights.

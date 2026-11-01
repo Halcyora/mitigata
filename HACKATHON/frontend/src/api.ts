@@ -1,4 +1,4 @@
-import type { ComplianceResponse, GraphResponse, ScanJob, ScanPlan, TargetId } from "./types";
+import type { ComplianceResponse, GraphResponse, ScanComparison, ScanJob, ScanPlan, TargetId } from "./types";
 
 const apiBaseUrl = (
   import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000"
@@ -6,6 +6,14 @@ const apiBaseUrl = (
 
 export function graphQueryKey(targetId: TargetId) {
   return ["graph", targetId] as const;
+}
+
+export function sarifExportUrl(targetId: TargetId): string {
+  return `${apiBaseUrl}/api/export/sarif?target_id=${encodeURIComponent(targetId)}`;
+}
+
+export function sarifCiGateUrl(targetId: TargetId): string {
+  return `${sarifExportUrl(targetId)}&fail_on_confirmed_high=true`;
 }
 
 export function scanJobQueryKey(targetId: TargetId) {
@@ -72,6 +80,12 @@ export async function fetchLatestScan(targetId: TargetId): Promise<ScanJob | nul
   );
   if (!response.ok) throw new Error(`Scan status request failed (${response.status})`);
   return response.json() as Promise<ScanJob | null>;
+}
+
+export async function fetchScanComparison(targetId: TargetId): Promise<ScanComparison> {
+  const response = await fetch(`${apiBaseUrl}/api/scans/compare?target_id=${encodeURIComponent(targetId)}`);
+  if (!response.ok) throw new Error(`Scan comparison failed (${response.status})`);
+  return response.json() as Promise<ScanComparison>;
 }
 
 export async function requestPatch(findingId: string, targetId: TargetId): Promise<{ patch: string; kind: string; source: string; file: string }> {

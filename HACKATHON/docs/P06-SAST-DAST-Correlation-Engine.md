@@ -323,7 +323,7 @@ DAST match.
 
 ---
 
-### 5.4 LangGraph Verification Loop
+### 5.4 Bounded Runtime Verification Loop
 
 **What it does:** Orchestrates a stateful agent that takes unverified "Code only" findings, triggers targeted runtime verification probes against a sandboxed container, and evaluates the HTTP response — converting "Code only" to "Confirmed" when exploitation evidence is found.
 
@@ -422,7 +422,7 @@ Every finding must be automatically classified and **ranked** by priority:
 **Requirements:**
 - Patch must be a valid unified Git diff (`git diff` format)
 - Fix must target the exact sink line identified by the AST mapper
-- Re-verification probe must be the same probe used in the original LangGraph loop
+- Re-verification probe must be the same probe used in the original bounded runtime verification loop
 - Result status must update live in the UI
 
 ---
@@ -480,7 +480,7 @@ Violating these boundaries wastes time and **actively reduces your score**.
 | AST Parser | **Python `ast`** module or **tree-sitter** |
 | Route Planner | Deterministic route/finding planner with `ScanPlan`, `ScanTask`, and `ScanEvent` contracts |
 | Model Ranking | **GraphCodeBERT** (mandatory ranking layer for ambiguous route/finding candidates; advisory only) |
-| Agent Orchestration | **LangGraph** (stateful graph-based agent) |
+| Verification orchestration | **Plain asynchronous Python workflow** |
 | Containerisation | **Docker + Docker Compose** (sandboxed target + all services) |
 | Frontend Graph | Any interactive graph library (e.g., React Flow, D3.js, Cytoscape.js) |
 | Version Control | **Git** (for diff generation and patch application) |
@@ -511,7 +511,7 @@ The engine must include a route-aware DAST planner before runtime scanning begin
 | Operation | Maximum Allowed Time |
 |---|---|
 | Full ingestion + correlation graph build | ≤ 10 seconds |
-| Single LangGraph verification probe | ≤ 2 seconds |
+| Single verification probe | ≤ 2 seconds |
 | UI attack path render | ≤ 3 seconds |
 | Patch generation + re-verification | ≤ 15 seconds |
 
@@ -540,7 +540,7 @@ The engine must include a route-aware DAST planner before runtime scanning begin
 
 | Score Band | Description |
 |---|---|
-| **24–25 pts** | Live LangGraph state machine fires targeted probes, captures HTTP evidence, and flips label from "Code only" to "Confirmed" in real time during the demo |
+| **24–25 pts** | Live verification workflow fires targeted probes, captures HTTP evidence, and flips label from "Code only" to "Confirmed" in real time during the demo |
 | **16–23 pts** | Probes fire but evidence capture is incomplete or label update is delayed |
 | **8–15 pts** | Static JSON upload only; no live probing |
 | **0–7 pts** | No runtime verification component |
@@ -721,7 +721,7 @@ networks:
 
 - Neither target app container may be directly accessible from the host machine
 - Both targets are isolated on the internal network; the engine contacts only the configured target for the selected profile
-- All LangGraph probes must route through the `internal` Docker network
+- All verification probes must route through the `internal` Docker network
 - This enforces the "no external traffic from probes" constraint
 
 ### 11.3 Volume Mount Strategy
@@ -747,7 +747,7 @@ healthcheck:
   retries: 3
 ```
 
-Engine must wait for the selected target's health check before running its scans or LangGraph probes (`depends_on: condition: service_healthy`). Both services may start at compose-up, but unselected profile data must not be mixed into the active scan.
+Engine must wait for the selected target's health check before running its scans or verification probes (`depends_on: condition: service_healthy`). Both services may start at compose-up, but unselected profile data must not be mixed into the active scan.
 
 ### 11.5 One-Command Startup Verification
 
@@ -783,7 +783,7 @@ Step 2 [0:30–1:30]  Navigate the Correlation Graph (Objective 02)
                     Show: Code-only alerts suppressed (70%+ noise reduction visible)
                     Say: "Deterministic AST linkage — exact file and line, not LLM guessing"
 
-Step 3 [1:30–2:30]  Live LangGraph Probe — label flip (Objective 02 + 03)
+Step 3 [1:30–2:30]  Live Runtime Verification — label flip (Objective 02 + 03)
                     Show: Click "Verify" on a Code only finding
                     Show: Probe fires, response captured, label flips "Code only" → "Confirmed" live
                     Show: probe_history panel — retry logic with variant payload
@@ -833,7 +833,7 @@ A submission is considered complete when **all** of the following are true:
 - [ ] A regression test proves same-route/CWE findings from different target IDs never correlate
 - [ ] Each real vulnerability appears exactly once in output
 - [ ] Each finding has `code_location` (file + line) AND/OR `runtime_proof` (URL + evidence)
-- [ ] LangGraph verification loop fires targeted probes and updates finding label
+- [ ] Runtime verification workflow fires targeted probes and updates finding label
 
 ### Objective 03 — Prioritise What to Fix
 - [ ] All findings labelled: Confirmed / Code only / Runtime only

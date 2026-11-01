@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -11,8 +12,11 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
+from ..verification_store import clear_target_verifications
+
 
 _ACTIVE_STATUSES = {"SAST_RUNNING", "DAST_RUNNING"}
+logger = logging.getLogger(__name__)
 
 
 class ScanAlreadyRunning(RuntimeError):
@@ -202,6 +206,7 @@ class ScanJobManager:
             return
 
         if scan_type == "sast":
+            clear_target_verifications(target_id)
             final_status = "SAST_COMPLETED"
             message = "SAST completed and its report is saved. Start DAST when ready."
         else:
@@ -214,6 +219,25 @@ class ScanJobManager:
         self._finish(job_id, final_status, message)
 
     def _finish(self, job_id: str, status: str, message: str) -> None:
+        if status in {"SAST_COMPLETED", "COMPLETED", "INCOMPLETE"}:
+            from ..api.graph import clear_graph_snapshot_cache, get_graph_snapshot
+            from .history import record_finding_snapshot
+
+            with self._lock:
+                job_for_snapshot = dict(self._jobs[job_id])
+            try:
+                clear_graph_snapshot_cache(str(job_for_snapshot["target_id"]))
+                findings = list(get_graph_snapshot(str(job_for_snapshot["target_id"])).findings)
+                record_finding_snapshot(
+                    self.project_root / "data",
+                    str(job_for_snapshot["target_id"]),
+                    {**job_for_snapshot, "status": status, "finished_at": datetime.now(timezone.utc).isoformat()},
+                    findings,
+                )
+            except Exception:
+                # A successful scanner run should remain successful if optional
+                # comparison history cannot be written.
+                logger.exception("Could not save scan comparison snapshot for %s", job_for_snapshot["target_id"])
         with self._lock:
             job = self._jobs[job_id]
             job.update(

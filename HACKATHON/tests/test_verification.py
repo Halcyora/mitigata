@@ -7,18 +7,18 @@ from typing import Any
 
 import pytest
 
-import engine.langgraph_loop.nodes as verification_nodes
+import engine.verification.nodes as verification_nodes
 from engine.ingestion.schema import UnifiedFinding
-from engine.langgraph_loop.graph import verify_finding
-from engine.langgraph_loop.nodes import (
+from engine.verification.workflow import verify_finding
+from engine.verification.nodes import (
     build_local_probe_url,
     probe_generator,
     response_evaluator,
     runtime_executor,
     should_retry,
 )
-from engine.langgraph_loop.profile import load_target_profile
-from engine.langgraph_loop.state import new_alert_state, state_from_finding
+from engine.verification.profile import load_target_profile
+from engine.verification.state import new_alert_state, state_from_finding
 
 
 def _state(**overrides: str) -> dict[str, Any]:
@@ -171,7 +171,7 @@ def test_graph_retries_once_then_confirms_and_records_history(
             trust_env=trust_env,
         )
 
-    monkeypatch.setattr("engine.langgraph_loop.nodes.httpx.AsyncClient", fake_client)
+    monkeypatch.setattr("engine.verification.nodes.httpx.AsyncClient", fake_client)
     finding = UnifiedFinding(
         id="sast-1",
         target_id="flask_demo",
@@ -233,7 +233,7 @@ def test_runtime_executor_enforces_overall_deadline(
         return real_timeout(0.01)
 
     monkeypatch.setattr(
-        "engine.langgraph_loop.nodes.httpx.AsyncClient", fake_client
+        "engine.verification.nodes.httpx.AsyncClient", fake_client
     )
     monkeypatch.setattr(verification_nodes.asyncio, "timeout", shortened_deadline)
 

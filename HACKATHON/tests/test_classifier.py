@@ -30,7 +30,7 @@ def test_classification_priority_and_confidence(
 ):
     result = classify(
         ast_reachable=reachable,
-        langgraph_label=verification,
+        verification_label=verification,
         is_config_only=config_only,
         dual_confirmed=dual_confirmed,
     )
@@ -52,7 +52,7 @@ def test_code_only_precedes_runtime_only_and_unknown_verification_is_conservativ
     ("kwargs", "message"),
     [
         ({"ast_reachable": 1}, "ast_reachable"),
-        ({"langgraph_label": "confirmed"}, "Unsupported verification label"),
+        ({"verification_label": "confirmed"}, "Unsupported verification label"),
         ({"is_config_only": "yes"}, "is_config_only"),
         ({"dual_confirmed": 1}, "dual_confirmed"),
     ],
@@ -60,7 +60,7 @@ def test_code_only_precedes_runtime_only_and_unknown_verification_is_conservativ
 def test_invalid_classification_inputs_are_rejected(kwargs, message):
     values = {
         "ast_reachable": None,
-        "langgraph_label": None,
+        "verification_label": None,
         "is_config_only": False,
         "dual_confirmed": False,
     }
@@ -82,7 +82,7 @@ def test_apply_classification_returns_copy_and_preserves_finding_evidence():
 
     classified = apply_classification(
         finding,
-        langgraph_label="Confirmed",
+        verification_label="Confirmed",
         dual_confirmed=True,
     )
 

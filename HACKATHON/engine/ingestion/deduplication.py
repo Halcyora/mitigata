@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import PurePosixPath
 from urllib.parse import urlparse
 
@@ -113,6 +114,13 @@ def deduplicate_findings(
                 if item
             )
         )
+        evidence_items = list(
+            dict.fromkeys(
+                json.dumps(item, sort_keys=True, default=str)
+                for item in [*existing.evidence_items, *finding.evidence_items]
+            )
+        )
+        evidence_items = [json.loads(item) for item in evidence_items]
         deduped[existing_index] = existing.model_copy(
             update={
                 "merged_from": merged_ids,
@@ -120,6 +128,8 @@ def deduplicate_findings(
                 "evidence": "\n--- duplicate alert evidence ---\n".join(evidence_parts)[:500]
                 if evidence_parts
                 else None,
+                "evidence_items": evidence_items,
+                "payload": existing.payload or finding.payload,
                 "reason": (
                     f"Collapsed {len(merged_ids)} duplicate scanner reports "
                     "for the same target, weakness, and source/request surface."

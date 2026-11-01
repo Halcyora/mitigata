@@ -22,6 +22,11 @@ cannot reach the target network; ZAP can reach only the isolated target
 network. Do not expose these intentionally vulnerable target containers to
 untrusted networks.
 
+The Compose API container cannot launch scanner jobs because it has no access to
+the host Docker daemon. To use the dashboard's **Run SAST** and **Run targeted +
+broad DAST** actions, use the host API mode below: it leaves the target apps and
+scanners in Docker and runs FastAPI on the host where Docker Compose is available.
+
 ### Run the API and GraphCodeBERT in the host Python environment
 
 Use this path when the engine Docker image cannot be rebuilt (for example, when

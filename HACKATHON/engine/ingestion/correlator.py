@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Literal
 from urllib.parse import urlparse
 
@@ -8,6 +9,23 @@ from .deduplication import deduplicate_findings
 from .schema import UnifiedFinding
 
 CorrelationLevel = Literal["Confirmed", "Corroborated"]
+_CWE_NUMBER = re.compile(r"^CWE\s*-?\s*(\d+)$", re.IGNORECASE)
+
+
+def _normalized_cwe(value: str) -> str | None:
+    """Canonicalize CWE formatting without treating related CWEs as equal."""
+    match = _CWE_NUMBER.fullmatch(value.strip())
+    if not match:
+        return None
+    number = int(match.group(1))
+    return f"CWE-{number}" if number > 0 else None
+
+
+def _same_parameter(name: str, expected: str, source: str) -> bool:
+    # HTTP header field names are case-insensitive; other request keys are not.
+    if source == "header":
+        return name.casefold() == expected.casefold()
+    return name == expected
 
 
 def candidate_match_level(
@@ -15,13 +33,16 @@ def candidate_match_level(
     sast_finding: UnifiedFinding,
     dast_finding: UnifiedFinding,
 ) -> CorrelationLevel | None:
-    """Classify a route-level SAST/DAST match by its input evidence strength."""
+    """Classify a route-level SAST/DAST match by CWE and input evidence."""
+    cwe_matches = (
+        _normalized_cwe(dast_finding.cwe_id) is not None
+        and _normalized_cwe(dast_finding.cwe_id)
+        == _normalized_cwe(sast_finding.cwe_id)
+    )
     if (
         route.target_id != sast_finding.target_id
         or route.target_id != dast_finding.target_id
-        or dast_finding.cwe_id != sast_finding.cwe_id
         or not dast_finding.url
-        or not dast_finding.method
         or not route.resolved
     ):
         return None
@@ -30,31 +51,38 @@ def candidate_match_level(
     if (
         not path
         or not route.matches_path(path)
-        or not route.matches_method(dast_finding.method)
+        or (
+            dast_finding.method is not None
+            and dast_finding.method.strip()
+            and not route.matches_method(dast_finding.method)
+        )
         or not route.contains_location(sast_finding.file, sast_finding.line)
     ):
         return None
 
-    # A complete, matching parameter/source pair is the strongest evidence.
+    # Scanner output often has the parameter but omits its source. If the route
+    # schema identifies exactly one source for that parameter, infer the missing
+    # source from deterministic AST evidence instead of downgrading the match.
+    # Ambiguous or incomplete input evidence remains Corroborated.
     inputs = route.input_parameters
     parameter = dast_finding.parameter
     parameter_source = dast_finding.parameter_source
     if not inputs:
         return "Corroborated"
-    if parameter and parameter_source:
-        return (
-            "Confirmed"
-            if any(
-                read.name == parameter and read.source == parameter_source
-                for read in inputs
-            )
-            else None
-        )
-    if parameter and not any(read.name == parameter for read in inputs):
-        return None
-    if parameter_source and not any(
-        read.source == parameter_source for read in inputs
-    ):
+    if parameter:
+        matching_reads = [
+            read for read in inputs if _same_parameter(read.name, parameter, read.source)
+        ]
+        if not matching_reads:
+            return None
+        if parameter_source:
+            if not any(read.source == parameter_source for read in matching_reads):
+                return None
+            return "Confirmed" if cwe_matches else "Corroborated"
+        if len({read.source for read in matching_reads}) == 1:
+            return "Confirmed" if cwe_matches else "Corroborated"
+        return "Corroborated"
+    if parameter_source and not any(read.source == parameter_source for read in inputs):
         return None
     return "Corroborated"
 
@@ -66,6 +94,11 @@ def _merge_pair(
     level: CorrelationLevel,
 ) -> UnifiedFinding:
     confirmed = level == "Confirmed"
+    cwe_matches = (
+        _normalized_cwe(dast_finding.cwe_id) is not None
+        and _normalized_cwe(dast_finding.cwe_id)
+        == _normalized_cwe(sast_finding.cwe_id)
+    )
     return sast_finding.model_copy(
         update={
             "label": level,
@@ -74,6 +107,11 @@ def _merge_pair(
             "parameter": dast_finding.parameter,
             "parameter_source": dast_finding.parameter_source,
             "evidence": dast_finding.evidence,
+            "payload": dast_finding.payload,
+            "evidence_items": [
+                *sast_finding.evidence_items,
+                *dast_finding.evidence_items,
+            ],
             "http_status": dast_finding.http_status,
             "merged_from": list(
                 dict.fromkeys(
@@ -89,8 +127,11 @@ def _merge_pair(
                 "Matched target, CWE, route, method, code scope, and request "
                 "parameter/source."
                 if confirmed
+                else "Matched target, route, method, and code scope; CWE differs "
+                "or is unavailable, so this is corroborative only."
+                if not cwe_matches
                 else "Matched target, CWE, route, method, and code scope; "
-                "request input evidence is incomplete or unavailable."
+                "request input evidence is incomplete or ambiguous."
             ),
             "confidence": 0.95 if confirmed else 0.72,
             "routes": list(dict.fromkeys([*dast_finding.routes, route.normalized_url])),

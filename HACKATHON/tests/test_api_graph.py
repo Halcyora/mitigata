@@ -169,8 +169,13 @@ def test_graph_and_verification_stream_are_target_scoped(monkeypatch):
         lambda target_id: snapshot if target_id == "flask_demo" else other_target,
     )
 
-    async def fake_astream(initial_state, stream_mode):
-        assert stream_mode == "values"
+    monkeypatch.setattr(
+        api_main,
+        "_verification_candidates",
+        lambda candidate, _target: [(candidate, "/users/{user_id}")],
+    )
+
+    async def fake_verification_states(initial_state):
         yield {
             **initial_state,
             "label": "Code only",
@@ -186,7 +191,9 @@ def test_graph_and_verification_stream_are_target_scoped(monkeypatch):
             ],
         }
 
-    monkeypatch.setattr(api_main.verification_graph, "astream", fake_astream)
+    monkeypatch.setattr(
+        api_main, "iter_verification_states", fake_verification_states
+    )
     client = TestClient(api_main.app)
 
     graph_response = client.get("/api/graph", params={"target_id": "flask_demo"})

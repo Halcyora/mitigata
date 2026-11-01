@@ -71,11 +71,14 @@ def test_templates_cover_supported_sinks_and_cwe_aliases():
         "ssti",
         "eval_injection",
         "insecure_deserialisation",
+        "hardcoded_secret",
+        "weak_crypto",
+        "unsafe_type_conversion",
     }
     assert get_template_patch("sql_injection") == PATCH_TEMPLATES["sql_injection"]
     assert get_template_patch("unknown") is None
     assert default_fix_template("CWE-89") == PATCH_TEMPLATES["sql_injection"]
-    assert "safe API" in default_fix_template("CWE-999")
+    assert "documented mitigation" in default_fix_template("CWE-999")
     assert "subprocess.run" in PATCH_TEMPLATES["command_injection"]
     assert "shlex.quote" not in PATCH_TEMPLATES["command_injection"]
     assert "render_template_string" not in PATCH_TEMPLATES["ssti"]
@@ -201,8 +204,12 @@ def test_missing_configuration_uses_template_without_openai(monkeypatch):
     assert "render_template" in result.content
 
 
-def test_unknown_sink_without_llm_patch_is_an_explicit_error(monkeypatch):
+def test_unknown_sink_without_llm_patch_returns_generic_guidance(monkeypatch):
     monkeypatch.delenv("SARVAM_API_KEY", raising=False)
 
-    with pytest.raises(PatchGenerationError, match="no template exists"):
-        generate_patch("unknown_sink", "app/routes.py", 1, "source")
+    result = generate_patch("unknown_sink", "app/routes.py", 1, "source", cwe_id="CWE-999")
+
+    assert result.kind == "guidance"
+    assert result.source == "deterministic_template"
+    assert "CWE-999" in result.content
+    assert "documented mitigation" in result.content

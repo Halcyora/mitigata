@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import json
 import logging
 import os
@@ -17,16 +18,23 @@ from pydantic import BaseModel, Field
 from ..compliance.mapping import FRAMEWORK_ORDER, map_finding_to_frameworks
 from ..compliance.risk_calculator import calculate_inr_exposure
 from ..ingestion.schema import UnifiedFinding
-from ..langgraph_loop.graph import verification_graph
-from ..langgraph_loop.state import state_from_finding
+from ..verification.nodes import CANARY_PAYLOADS, NON_PROBEABLE_SINKS
+from ..verification.state import state_from_finding
+from ..verification.workflow import iter_verification_states
 from ..patch_engine.llm_patcher import (
     PatchGenerationError,
     apply_unified_diff,
     generate_patch,
 )
 from ..dast_planner.planner import build_scan_plan
-from ..langgraph_loop.profile import load_target_profile
+from ..verification.profile import load_target_profile
+from ..verification_store import (
+    clear_verification_result,
+    clear_target_verifications,
+    save_confirmed_result,
+)
 from ..scan_manager.jobs import ScanAlreadyRunning, scan_jobs
+from ..scan_manager.history import compare_finding_snapshots
 from .graph import (
     GraphResponse,
     _profile_data,
@@ -138,7 +146,13 @@ def create_patch(request: PatchRequest) -> dict[str, object]:
     start, end = max(0, finding.line - 41), min(len(source_lines), finding.line + 40)
     context = "\n".join(f"{line_no + 1}: {source_lines[line_no]}" for line_no in range(start, end))
     try:
-        result = generate_patch(finding.sink_type, finding.file, finding.line, context)
+        result = generate_patch(
+            finding.sink_type,
+            finding.file,
+            finding.line,
+            context,
+            cwe_id=finding.cwe_id,
+        )
     except PatchGenerationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if result.kind == "unified_diff":
@@ -182,6 +196,8 @@ def apply_patch_endpoint(request: PatchApplyRequest) -> dict[str, object]:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     with _PATCH_PREVIEW_LOCK:
         _PATCH_PREVIEWS.pop((request.target_id, finding.id), None)
+    clear_target_verifications(request.target_id)
+    clear_graph_snapshot_cache(request.target_id)
     return {"finding_id": finding.id, "target_id": request.target_id, "file": finding.file, "applied": True}
 
 
@@ -273,6 +289,11 @@ def get_latest_scan(target_id: TargetId) -> dict[str, object] | None:
     return job
 
 
+@app.get("/api/scans/compare")
+def compare_scans(target_id: TargetId) -> dict[str, object]:
+    return compare_finding_snapshots(scan_jobs.project_root / "data", target_id)
+
+
 @app.get("/api/scans/{job_id}")
 def get_scan(job_id: str) -> dict[str, object]:
     job = scan_jobs.get(job_id)
@@ -287,6 +308,109 @@ def _sse_event(payload: dict[str, object], event: str | None = None) -> str:
     prefix = f"event: {event}\n" if event else ""
     data = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
     return f"{prefix}data: {data}\n\n"
+
+
+def _verification_candidates(
+    finding: UnifiedFinding, target_id: TargetId
+) -> list[tuple[UnifiedFinding, str]]:
+    """Build bounded probes from AST routes and the request inputs they read."""
+    if (
+        not finding.sink_type
+        or finding.sink_type not in CANARY_PAYLOADS
+        or finding.sink_type in NON_PROBEABLE_SINKS
+    ):
+        return []
+    profile = _profile_data(target_id)
+    routes, _ = _routes_and_stats(target_id, profile)
+    candidates: list[tuple[UnifiedFinding, str]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for route in routes:
+        if (
+            route.target_id != target_id
+            or not route.resolved
+            or not route.contains_location(finding.file, finding.line)
+        ):
+            continue
+        methods = sorted(
+            method.upper()
+            for method in route.methods
+            if method.upper() in {"GET", "POST"}
+        )
+        for method in methods:
+            for request_input in route.input_parameters:
+                if request_input.source in {"form", "json"} and method != "POST":
+                    continue
+                identity = (
+                    route.normalized_url,
+                    method,
+                    request_input.name,
+                    request_input.source,
+                )
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                candidate = finding.model_copy(
+                    update={
+                        "url": route.raw_url,
+                        "method": method,
+                        "parameter": request_input.name,
+                        "parameter_source": request_input.source,
+                        "label": "Code only",
+                    }
+                )
+                candidates.append((candidate, route.normalized_url))
+                if len(candidates) >= 4:
+                    return candidates
+    if (
+        len(candidates) < 4
+        and finding.sink_type == "ssti"
+        and _is_flask_not_found_handler(finding, profile)
+    ):
+        candidate = finding.model_copy(
+            update={
+                "url": "/__mitigata_not_found__/{probe_path}",
+                "method": "GET",
+                "parameter": "probe_path",
+                "parameter_source": "path",
+                "label": "Code only",
+            }
+        )
+        candidates.append((candidate, "/__mitigata_not_found__/{probe_path}"))
+    return candidates
+
+
+def _is_flask_not_found_handler(
+    finding: UnifiedFinding, profile: dict[str, object]
+) -> bool:
+    """Recognize source within a Flask 404 handler, which has no route decorator."""
+    if not finding.file or not finding.line or profile.get("framework") != "flask":
+        return False
+    source_root = _source_dir(profile.get("source_dir"))
+    if source_root is None:
+        return False
+    source_path = (source_root / finding.file).resolve()
+    if not source_path.is_relative_to(source_root) or not source_path.is_file():
+        return False
+    try:
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, SyntaxError):
+        return False
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not (node.lineno <= finding.line <= getattr(node, "end_lineno", node.lineno)):
+            continue
+        for decorator in node.decorator_list:
+            if (
+                isinstance(decorator, ast.Call)
+                and isinstance(decorator.func, ast.Attribute)
+                and decorator.func.attr == "errorhandler"
+                and decorator.args
+                and isinstance(decorator.args[0], ast.Constant)
+                and decorator.args[0].value == 404
+            ):
+                return True
+    return False
 
 
 @app.get("/api/verify/{finding_id}/stream")
@@ -304,10 +428,33 @@ async def verify_stream(
         raise HTTPException(
             status_code=422, detail="Only source-code findings can be verified"
         )
-    try:
-        initial_state = state_from_finding(finding)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    candidates = _verification_candidates(finding, target_id)
+    if not candidates:
+        async def unavailable() -> AsyncIterator[str]:
+            yield _sse_event(
+                {
+                    "finding_id": finding.id,
+                    "target_id": target_id,
+                    "done": True,
+                    "error": (
+                        "No safe probe is available for this sink, or no resolved "
+                        "route with request inputs was found."
+                    ),
+                },
+                event="verification-error",
+            )
+
+        return StreamingResponse(
+            unavailable(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+    clear_verification_result(target_id, finding.id)
+    clear_graph_snapshot_cache(target_id)
 
     async def stream() -> AsyncIterator[str]:
         current_label = finding.label or "Code only"
@@ -320,34 +467,75 @@ async def verify_stream(
                 "done": False,
             }
         )
-        final_state = initial_state
+        final_state: dict[str, object] = {
+            "label": "Code only",
+            "probe_history": [],
+            "evidence": None,
+            "http_status": None,
+        }
+        combined_history: list[dict[str, object]] = []
+        successful_candidate: tuple[UnifiedFinding, str] | None = None
         try:
-            async for state in verification_graph.astream(
-                initial_state, stream_mode="values"
-            ):
-                final_state = state
-                current_label = state["label"]
-                payload: dict[str, object] = {
-                    "finding_id": finding.id,
-                    "target_id": target_id,
-                    "label": current_label,
-                    "probe_history": state["probe_history"],
-                    "done": False,
-                }
-                if state.get("evidence"):
-                    payload["evidence"] = state["evidence"]
-                if state.get("error"):
-                    payload["error"] = state["error"]
-                yield _sse_event(payload)
-                await asyncio.sleep(0)
+            for candidate_finding, route_path in candidates:
+                initial_state = state_from_finding(candidate_finding)
+                candidate_history: list[dict[str, object]] = []
+                async for state in iter_verification_states(initial_state):
+                    final_state = state
+                    current_label = state["label"]
+                    candidate_history = [
+                        {
+                            **record,
+                            "route": route_path,
+                            "parameter": candidate_finding.parameter,
+                            "parameter_source": candidate_finding.parameter_source,
+                        }
+                        for record in state["probe_history"]
+                    ]
+                    payload: dict[str, object] = {
+                        "finding_id": finding.id,
+                        "target_id": target_id,
+                        "label": current_label,
+                        "probe_history": [*combined_history, *candidate_history],
+                        "done": False,
+                    }
+                    if state.get("evidence"):
+                        payload["evidence"] = state["evidence"]
+                    yield _sse_event(payload)
+                    await asyncio.sleep(0)
+                combined_history = [*combined_history, *candidate_history]
+                if final_state.get("label") == "Confirmed":
+                    successful_candidate = (candidate_finding, route_path)
+                    break
+
+            current_label = (
+                "Confirmed" if successful_candidate is not None else "Code only"
+            )
+            evidence = final_state.get("evidence")
+            if successful_candidate is not None:
+                candidate_finding, route_path = successful_candidate
+                save_confirmed_result(
+                    target_id,
+                    finding.id,
+                    {
+                        "label": "Confirmed",
+                        "url": candidate_finding.url,
+                        "route": route_path,
+                        "method": candidate_finding.method,
+                        "parameter": candidate_finding.parameter,
+                        "parameter_source": candidate_finding.parameter_source,
+                        "evidence": evidence,
+                        "http_status": final_state.get("http_status"),
+                        "probe_history": combined_history[-8:],
+                    },
+                )
+                clear_graph_snapshot_cache(target_id)
             yield _sse_event(
                 {
                     "finding_id": finding.id,
                     "target_id": target_id,
                     "label": current_label,
-                    "probe_history": final_state["probe_history"],
-                    "evidence": final_state.get("evidence"),
-                    "error": final_state.get("error"),
+                    "probe_history": combined_history,
+                    "evidence": evidence,
                     "done": True,
                 }
             )

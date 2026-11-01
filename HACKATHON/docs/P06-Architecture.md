@@ -18,7 +18,7 @@
    - 4.1 [Ingestion Pipeline — FR-1, FR-2, FR-3](#41-ingestion-pipeline--fr-1-fr-2-fr-3)
    - 4.2 [Three-Pass AST Route Mapper — FR-4](#42-three-pass-ast-route-mapper--fr-4)
    - 4.3 [Correlation & Merge Engine — FR-5, FR-6](#43-correlation--merge-engine--fr-5-fr-6)
-   - 4.4 [LangGraph Verification Loop — B-1](#44-langgraph-verification-loop--b-1)
+   - 4.4 [Runtime Verification Loop — B-1](#44-runtime-verification-loop--b-1)
    - 4.5 [3-Label Classifier — FR-7, FR-9](#45-3-label-classifier--fr-7-fr-9)
    - 4.6 [Patch Engine — B-4](#46-patch-engine--b-4)
    - 4.7 [Compliance Translator](#47-compliance-translator)
@@ -49,7 +49,7 @@ flowchart TD
         AST["Three-Pass AST Route Mapper\nPass 1: routes + prefixes + normalized URL\nPass 2: one-hop helper scopes\nPass 3: request parameter reads\nFlask Python + Express JavaScript adapters"]
         PLAN["DAST Planner + Mandatory GraphCodeBERT\nroute/rule prioritisation\nreason codes + scan tasks"]
         CORR["Correlation & Merge Engine\nFR-5: target + CWE + route + scope + parameter\nmethod/source checked when available\nFR-6: deduplicate each pair once"]
-        LG["LangGraph Verification\nB-1: Code only → Confirmed\nstateful probe loop\ninternal Docker network"]
+        LG["Bounded Runtime Verification\nB-1: Code only → Confirmed\nplain Python probe workflow\ninternal Docker network"]
         UF --> AST
         AST --> PLAN
         PLAN --> CORR
@@ -123,7 +123,7 @@ graph TB
     style VOLUMES fill:#2d2d15,color:#fff
 ```
 
-> **Security invariant:** `mitigata-target` is reachable **only** from `mitigata-engine` via the internal Docker network. All LangGraph probes route through the engine. No external traffic ever leaves the Docker network.
+> **Security invariant:** `mitigata-target` is reachable **only** from `mitigata-engine` via the internal Docker network. All runtime verifier probes route through the engine. No external traffic ever leaves the Docker network.
 
 ---
 
@@ -175,12 +175,12 @@ sequenceDiagram
     participant U as User
     participant FE as Frontend
     participant E as Engine
-    participant LG as LangGraph
+    participant LG as runtime verifier
     participant T as Target :5050
 
     U->>FE: click "Verify" on Code only finding
     FE->>E: POST /api/verify/{finding_id}
-    E->>LG: invoke verification_graph(AlertState)
+    E->>LG: invoke iter_verification_states(AlertState)
 
     Note over LG: probe_generator node
     LG->>LG: select payload by sink_type + variant=0
@@ -238,7 +238,7 @@ flowchart LR
     TPL --> DIFF
 
     DIFF --> APPLY[User clicks Apply\ngit apply --check\ngit apply]
-    APPLY --> REVERIFY[Re-run same\nLangGraph probe]
+    APPLY --> REVERIFY[Re-run same\nruntime verifier probe]
     REVERIFY --> RESULT{Probe\nblocked?}
     RESULT -->|Yes| FIXED([✅ Fix Verified\nVulnerability Closed])
     RESULT -->|No| INSUFF([❌ Fix Insufficient\nRe-patch Required])
@@ -370,7 +370,7 @@ and routes with different `target_id` values never correlate. Unresolved route m
 locations, dynamic request keys, or absent parameter evidence remain unmatched.
 Each DAST finding can be consumed by at most one SAST finding in a run.
 
-### 4.4 LangGraph Verification Loop — B-1
+### 4.4 Runtime Verification Loop — B-1
 
 ```mermaid
 stateDiagram-v2
@@ -405,13 +405,13 @@ stateDiagram-v2
 
 ```mermaid
 flowchart TD
-    INPUT([Finding after\ncorrelation + LangGraph]) --> R1
+    INPUT([Finding after\ncorrelation + runtime verifier]) --> R1
 
-    R1{LangGraph=Confirmed\nAND dual_confirmed?}
+    R1{runtime verifier=Confirmed\nAND dual_confirmed?}
     R1 -->|Yes| C1["🔴 Confirmed\nconfidence=0.98\ntarget + CWE + route + scope + parameter match"]
 
     R1 -->|No| R2
-    R2{LangGraph=Confirmed?}
+    R2{runtime verifier=Confirmed?}
     R2 -->|Yes| C2["🔴 Confirmed\nconfidence=0.90\nHTTP evidence captured"]
 
     R2 -->|No| R3
@@ -452,7 +452,7 @@ flowchart LR
     subgraph APPLY["Apply + Re-verify"]
         CHECK["git apply --check\ndry-run validation"]
         APPLY2["git apply\nwrite only to selected target source"]
-        REVERIFY["Re-run same LangGraph probe\nexact same payload"]
+        REVERIFY["Re-run same runtime verifier probe\nexact same payload"]
         RESULT["✅ Fix Verified\nor ❌ Re-patch Required"]
     end
 
@@ -496,7 +496,7 @@ flowchart TD
 graph LR
     subgraph API["FastAPI Engine — http://localhost:8000"]
         G["GET /api/graph\nfull correlation graph\n≤10s · ELK layout"]
-        V["POST /api/verify/{id}\nLangGraph probe\nSSE stream"]
+        V["POST /api/verify/{id}\nruntime verifier probe\nSSE stream"]
         VS["GET /api/verify/{id}/stream\nSSE for EventSource"]
         P["POST /api/patch/{id}\ngenerate patch\nSarvam GLM-5.3 → template"]
         PA["POST /api/patch/{id}/apply\napply + re-verify"]
@@ -511,7 +511,7 @@ graph LR
     subgraph MODULES["Engine Modules"]
         ING["ingestion/\nsemgrep_parser\nzap_parser\ncorrelator"]
         AST["ast_mapper/\nroute_extractor\nsink_detector\ncall_graph · merger"]
-        LGM["langgraph_loop/\nstate · nodes · graph"]
+        LGM["verification/\nstate · nodes · graph"]
         CLF["classifier/\nclassifier"]
         PCH["patch_engine/\nllm_patcher · templates\npatcher"]
         CMP["compliance/\nrisk_calculator · mapping"]
@@ -665,7 +665,7 @@ classDiagram
     RouteNode "1" --> "0..*" ParameterRead : observed request inputs
 ```
 
-### 6.3 AlertState — LangGraph
+### 6.3 AlertState — runtime verifier
 
 ```mermaid
 classDiagram
@@ -833,7 +833,7 @@ gantt
     GET /api/graph (cold)        :crit, 0, 10
     GET /api/graph (warm/cached) :0, 1
 
-    section LangGraph Probes
+    section runtime verifier Probes
     Single probe (hard limit)    :crit, 0, 2
     Probe + retry (2 attempts)   :0, 4
 
@@ -857,7 +857,7 @@ gantt
 | Target healthcheck | < 30s | curl retry 3× with 10s gap |
 | `GET /api/graph` (cold) | **≤ 10s** | AST parse + ELK layout |
 | `GET /api/graph` (warm) | < 1s | in-memory cache |
-| Single LangGraph probe | **≤ 2s** | `httpx timeout=2.0` |
+| Single runtime verifier probe | **≤ 2s** | `httpx timeout=2.0` |
 | Probe + retry | ≤ 4s | 2 × 2s probes |
 | UI initial render | **≤ 3s** | pre-computed ELK positions |
 | Patch generation (GLM-5.3) | ≤ 10s | 10s timeout on LLM |
@@ -889,10 +889,10 @@ graph TD
             MG["merger.py\nAST enrichment"]
         end
 
-        subgraph LGM["langgraph_loop/"]
+        subgraph LGM["verification/"]
             ST["state.py\nAlertState TypedDict"]
             ND["nodes.py\nhttpx, os"]
-            GR["graph.py\nStateGraph"]
+            GR["workflow.py\nplain async sequence"]
         end
 
         CLF["classifier/classifier.py\nstdlib only"]
@@ -943,14 +943,14 @@ graph TD
         FASTAPI["fastapi · uvicorn"]
         PYDANTIC["pydantic>=2"]
         HTTPX["httpx"]
-        LG_DEP["langgraph"]
+        PY_DEP["plain Python"]
         OAI["openai (optional)"]
     end
 
     MAIN --- FASTAPI
     SCHEMA --- PYDANTIC
     ND --- HTTPX
-    GR --- LG_DEP
+    GR --- PY_DEP
     LP --- OAI
 ```
 
@@ -961,7 +961,7 @@ graph LR
     subgraph OBJ["Objectives → Components"]
         O1["Objective 01\nFR-1 FR-2 FR-3"] --> C1["semgrep_parser\nzap_parser\nschema UnifiedFinding"]
         O2["Objective 02\nFR-4 FR-5 FR-6"] --> C2["three-pass Flask/Express route adapters FR-4\nroute-aware DAST planner + GraphCodeBERT ranking\ncorrelator: target + CWE + route + scope + parameter\nmethod/source when available · FR-5 FR-6 dedup"]
-        O3["Objective 03\nFR-7 FR-8 FR-9"] --> C3["classifier\nlanggraph_loop B-1\nFindingDetailPanel FR-8\ncorrelator sort FR-9"]
+        O3["Objective 03\nFR-7 FR-8 FR-9"] --> C3["classifier\nverification B-1\nFindingDetailPanel FR-8\ncorrelator sort FR-9"]
     end
 ```
 

@@ -26,7 +26,9 @@ from engine.scan_manager.coordinator import apply_task_update, build_scan_state,
 
 DATA_DIR = ROOT / "data"
 RAW_DIR = DATA_DIR / "raw"
-TARGETS_DIR = ROOT / "targets"
+TARGETS_DIR = Path(
+    os.environ.get("TARGETS_ROOT", str(ROOT / "targets"))
+).expanduser().resolve()
 
 TARGET_SERVICES = {
     "flask_demo": ("target-flask", 5050),
@@ -107,7 +109,12 @@ def run_compose(
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("Docker Compose command exceeded the DAST time budget") from exc
     except FileNotFoundError as exc:
-        raise RuntimeError("Docker Compose is required to run containerized scans") from exc
+        raise RuntimeError(
+            "The scan runner cannot find Docker Compose. The API container does not "
+            "have access to the host Docker daemon. For dashboard scans, keep the "
+            "target apps in Docker and run the API on the host with "
+            "scripts/start_local_engine.ps1."
+        ) from exc
 
 
 def run_docker(

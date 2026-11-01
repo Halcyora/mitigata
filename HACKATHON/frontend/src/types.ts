@@ -17,8 +17,12 @@ export interface GraphNodeData {
   file?: string | null;
   line?: number | null;
   routes?: string[];
+  mapped_urls?: string[];
   cwe?: string | null;
   evidence?: string | null;
+  evidence_items?: Array<Record<string, unknown>>;
+  payload?: string | null;
+  risk_score?: number | null;
   merged_from?: string[];
   reason?: string | null;
   url?: string | null;
@@ -26,6 +30,12 @@ export interface GraphNodeData {
   parameter?: string | null;
   parameter_source?: string | null;
   http_status?: number | null;
+  severity?: string | null;
+  source?: string | null;
+  source_snippet?: string | null;
+  sink_type?: string | null;
+  function?: string | null;
+  remediation?: string | null;
 }
 
 export interface GraphNode {
@@ -125,12 +135,28 @@ export interface ScanJob {
   error: string | null;
 }
 
+export interface ScanComparison {
+  target_id: TargetId;
+  available: boolean;
+  reason?: string;
+  previous?: { scan_id?: string; scan_type?: string; finished_at?: string };
+  current?: { scan_id?: string; scan_type?: string; finished_at?: string };
+  new?: Array<Record<string, unknown>>;
+  fixed?: Array<Record<string, unknown>>;
+  still_open?: Array<Record<string, unknown>>;
+}
+
 export interface ProbeRecord {
   variant?: number;
   payload?: string;
   status?: number;
   response_preview?: string;
   error?: string;
+  route?: string;
+  method?: string;
+  parameter?: string;
+  parameter_source?: string;
+  location?: string;
 }
 
 export interface VerificationEvent {

@@ -117,6 +117,7 @@ export function useVerification(findingId: string | null, targetId: TargetId) {
         },
       );
       if (event.done) {
+        void queryClient.invalidateQueries({ queryKey: graphQueryKey(targetId) });
         setStatus(event.error ? "error" : "done");
         source.close();
       }

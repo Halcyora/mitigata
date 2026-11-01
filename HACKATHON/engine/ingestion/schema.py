@@ -25,7 +25,9 @@ class UnifiedFinding(BaseModel):
     route: str | None = None
     parameter: str | None = None
     parameter_source: Literal["path", "query", "form", "json", "header"] | None = None
+    payload: str | None = None
     evidence: str | None = None
+    evidence_items: list[dict[str, object]] = Field(default_factory=list)
     http_status: int | None = None
 
     rule_id: str | None = None

@@ -20,7 +20,7 @@ against its own pinned-revision ground truth and report those results separately
 
 | Category | Count | Our Label | How We Hit It |
 |---|---|---|---|
-| Code + Runtime pairs (linkable) | **20** | Confirmed | CWE + route + scope + parameter → merge → LangGraph probe |
+| Code + Runtime pairs (linkable) | **20** | Confirmed | CWE + route + scope + parameter → merge → runtime verification probe |
 | Code only (e.g. hardcoded secrets) | **10** | Code only | SAST only, no DAST match |
 | Runtime only (e.g. missing headers) | **6** | Runtime only | DAST only, no SAST match |
 | Safe decoys (false positive traps) | **~8** | Should NOT be reported | AST reachability + parameterised query detection |
@@ -57,11 +57,11 @@ against its own pinned-revision ground truth and report those results separately
 
 | Bonus | Feature | Our Implementation |
 |---|---|---|
-| **B-1** | Auto-verify Code only → Confirmed | LangGraph verification loop (Phase 4) |
-| **B-2** | Cut SAST noise (parameterised queries, dead code) | AST reachability + sink safety check (Phase 3) |
+| **B-1** | Auto-verify Code only → Confirmed | bounded, target-scoped safe probes exposed from each eligible Code only finding (Phase 4); unsupported sinks and unresolved routes are not probed |
+| **B-2** | Cut SAST noise (parameterised queries, dead code) | AST route reachability plus suppression of Python SQL findings only when a static query, recognized bind marker, and explicit separate bind values are present (Phase 3) |
 | **B-3** | Explain every link (why joined) | `merged_from[]` + `reason` field in UI |
-| **B-4** | Plain-English fix suggestion | Sarvam GLM-5.3 patch + template (Phase 6) |
-| B-5 | Compare two scans | Out of scope for v1 |
+| **B-4** | Plain-English fix suggestion | CWE-specific remediation is shown on every finding; Sarvam patch preview remains optional (Phase 6) |
+| **B-5** | Compare two scans | target-scoped scan snapshots and new/fixed/still-open comparison in the API and UI |
 | **B-6** | Export SARIF + CI fail on confirmed HIGH | SARIF export endpoint `/api/export/sarif` |
 | **B-7** | **Second language** | **Express/Node.js adapter + OWASP Juice Shop target profile** |
 
@@ -102,7 +102,7 @@ Build in **descending scoring weight** so a partial demo still scores maximally:
 | 1 | Repo scaffold + Flask and Juice Shop targets | All | — | Yes — everything runs on this |
 | 2 | Unified ingestion pipeline | Obj 01 | 30 pts (shared) | Yes |
 | 3 ⭐ | Three-pass AST route mapper + strict correlation | Obj 02 | 30 pts (shared) | Yes — highest weight |
-| 4 | LangGraph verification loop | Obj 02+03 | 25 pts | Yes |
+| 4 | bounded Python verification workflow | Obj 02+03 | 25 pts | Yes |
 | 5 | 3-label classifier + prioritised ranking | Obj 03 | 20 pts (shared) | Yes |
 | 6 | Git diff auto-remediation | Obj 03 | 20 pts (shared) | Yes |
 | 7 | Correlation graph UI | All | 10 pts | Yes |
@@ -268,7 +268,7 @@ counts into that manifest.
 
 **⚠️ Critical port:** The app runs on **port 5050** (`APP_PORT = os.environ.get('APP_PORT', 5050)` in `app/app.py`).
 
-**Key demo moment — SSTI in 404 handler:** The `pnf(e)` function uses `render_template_string(template % request.url)` — SSTI via URL. Reachable by hitting any non-existent route. Perfect live demo: starts as "Code only", LangGraph fires `{{7*7}}` in URL, gets `49` back → flips to "Confirmed" live.
+**Key demo moment — SSTI in 404 handler:** The `pnf(e)` function uses `render_template_string(template % request.url)` — SSTI via URL. Reachable by hitting any non-existent route. Perfect live demo: starts as "Code only", runtime verification fires `{{7*7}}` in URL, gets `49` back → flips to "Confirmed" live.
 
 ### 1.3 Supplement we45 with dead-code module for guaranteed ≥70% suppression
 
@@ -376,10 +376,10 @@ mitigata-p06/
 │   │   ├── javascript_sink_visitor.py ← Express/JavaScript sink patterns
 │   │   ├── call_graph.py          ← Adapter-provided one-hop scopes + request reads
 │   │   └── merger.py              ← Enrich SAST findings with AST reachability
-│   ├── langgraph_loop/
+│   ├── verification/
 │   │   ├── state.py               ← AlertState TypedDict
 │   │   ├── nodes.py               ← probe_generator, runtime_executor, response_evaluator
-│   │   └── graph.py               ← StateGraph with conditional retry edge
+│   │   └── workflow.py            ← plain Python workflow with conditional retry
 │   ├── classifier/
 │   │   └── classifier.py          ← Confirmed/Code only/Runtime only + ranking (Obj 03)
 │   ├── patch_engine/
@@ -633,7 +633,7 @@ class UnifiedFinding(BaseModel):
     function: Optional[str] = None
     sink_type: Optional[str] = None         # e.g. "sql_injection", "ssti"
 
-    # Runtime proof (from DAST + LangGraph)
+    # Runtime proof (from DAST + runtime verification)
     url: Optional[str] = None
     method: Optional[str] = None
     parameter: Optional[str] = None
@@ -1192,182 +1192,11 @@ def enrich_findings_with_ast(
 
 ---
 
-## Phase 4 — LangGraph Verification Loop (Objective 02 + 03)
+## Phase 4 — Bounded Runtime Verification (Objective 02 + 03)
 
-**Scoring impact:** 25 pts. Judges watch this live. The label flip from "Code only" → "Confirmed" is the demo moment.
+The verifier is a plain asynchronous Python workflow; it does not depend on an agent framework or make LLM calls. `engine/verification/workflow.py` sequences the existing probe, HTTP execution, response evaluation, and one conditional retry. It yields each state so the API can stream progress to the UI.
 
-### 4.1 AlertState
-
-```python
-# engine/langgraph_loop/state.py
-from typing import TypedDict, Literal, Optional
-
-
-class AlertState(TypedDict):
-    finding_id: str
-    target_id: str
-    route: str
-    method: str
-    parameter: str
-    parameter_source: str
-    sink_type: str
-    probe_payload: str
-    probe_variant: int           # 0 = first attempt, 1 = retry
-    http_status: Optional[int]
-    http_response: Optional[str]
-    evidence: Optional[str]
-    label: Literal["Confirmed", "Code only", "Runtime only", "UNVERIFIED"]
-    error: Optional[str]
-    probe_history: list[dict]    # audit log — shown in UI detail panel
-```
-
-### 4.2 Canary payloads (safe read-only strings — never destructive)
-
-```python
-# engine/langgraph_loop/nodes.py
-import httpx
-from .state import AlertState
-
-CANARY_PAYLOADS: dict[str, list[str]] = {
-    "sql_injection":          ["' OR '1'='1",          "' OR 1=1--"],
-    "xss":                    ["<script>alert(1)</script>", "<img src=x onerror=alert(1)>"],
-    "command_injection":      ["; echo CANARY_MITIGATA_2026", "| echo CANARY_MITIGATA_2026"],
-    "ssti":                   ["{{7*7}}",               "${7*7}"],
-    "jwt_weak_secret":        [
-        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
-        ".eyJ1c2VyIjoiYWRtaW4ifQ"
-        ".dyt0CoTl4WoVjAHI9Q_CwSKhl6d_9rhM3NrXuJttkao",
-    ],
-    "eval_injection":         ["__import__('os').getcwd()", "1+1"],
-    "insecure_deserialisation": ["",                    "\x80\x04\x95"],
-    "weak_hash":              ["test",                  "password"],
-    "hardcoded_secret":       ["",                      ""],
-}
-
-EVIDENCE_SIGNALS: dict[str, list[str]] = {
-    "sql_injection":           ["OperationalError", "sqlite3", "syntax error", "OR '1'='1"],
-    "xss":                     ["<script>", "alert(1)", "onerror"],
-    "command_injection":       ["CANARY_MITIGATA_2026"],
-    "ssti":                    ["49", "Jinja2", "TemplateError"],
-    "jwt_weak_secret":         ["Authenticated", "True", "admin", "User"],
-    "eval_injection":          ["/app", "getcwd", "/target"],
-    "insecure_deserialisation": ["pickle", "UnpicklingError"],
-    "weak_hash":               ["md5", "hash"],
-}
-
-
-def probe_generator(state: AlertState) -> AlertState:
-    payloads = CANARY_PAYLOADS.get(state["sink_type"], ["CANARY_MITIGATA"])
-    variant = state.get("probe_variant", 0)
-    state["probe_payload"] = payloads[min(variant, len(payloads) - 1)]
-    return state
-
-
-def runtime_executor(state: AlertState) -> AlertState:
-    try:
-        profile = load_target_profile(state["target_id"])
-        url = build_local_probe_url(profile, state)
-        params = {state["parameter"]: state["probe_payload"]}
-        json_body = params if state["parameter_source"] == "json" else None
-        form_body = params if state["parameter_source"] == "form" else None
-        headers = (
-            {state["parameter"]: state["probe_payload"]}
-            if state["parameter_source"] == "header" else None
-        )
-        r = httpx.request(
-            method=state["method"],
-            url=url,
-            json=json_body,
-            data=form_body,
-            params=params if state["parameter_source"] == "query" else None,
-            headers=headers,
-            timeout=2.0,
-            follow_redirects=True,
-        )
-        state["http_status"] = r.status_code
-        state["http_response"] = r.text[:500]
-        state["probe_history"] = state.get("probe_history", []) + [{
-            "variant": state.get("probe_variant", 0),
-            "payload": state["probe_payload"],
-            "status": r.status_code,
-            "response_preview": r.text[:200],
-        }]
-    except httpx.TimeoutException:
-        state["error"] = "probe_timeout"
-        state["label"] = "Code only"
-    except Exception as e:
-        state["error"] = str(e)[:200]
-        state["label"] = "Code only"
-    return state
-
-
-def response_evaluator(state: AlertState) -> AlertState:
-    if state.get("error"):
-        return state
-    response = state.get("http_response", "")
-    signals = EVIDENCE_SIGNALS.get(state["sink_type"], [])
-    found = [s for s in signals if s in response]
-    if found:
-        state["evidence"] = f"Response contained exploitation signals: {found}"
-        state["label"] = "Confirmed"   # Objective 03: flip to Confirmed
-    else:
-        state["label"] = "Code only"
-    return state
-
-
-def retry_evaluator(state: AlertState) -> AlertState:
-    state["probe_variant"] = state.get("probe_variant", 0) + 1
-    state["error"] = None
-    state["http_response"] = None
-    return state
-
-
-def should_retry(state: AlertState) -> str:
-    if state["label"] == "Code only" and state.get("probe_variant", 0) == 0:
-        return "retry"
-    return "end"
-```
-
-`build_local_probe_url` materializes a concrete path parameter from the selected
-profile's route template and sample values, and validates that it stays on that
-profile's configured local target. Never probe an arbitrary host taken from a
-finding URL. For a known DAST URL, retain its path/query values but rebuild the
-origin from the selected profile.
-
-### 4.3 Wire the graph (with conditional retry edge)
-
-```python
-# engine/langgraph_loop/graph.py
-from langgraph.graph import StateGraph, END
-from .state import AlertState
-from .nodes import probe_generator, runtime_executor, response_evaluator, retry_evaluator, should_retry
-
-
-def build_verification_graph():
-    g = StateGraph(AlertState)
-    g.add_node("probe_generator",    probe_generator)
-    g.add_node("runtime_executor",   runtime_executor)
-    g.add_node("response_evaluator", response_evaluator)
-    g.add_node("retry_evaluator",    retry_evaluator)
-
-    g.set_entry_point("probe_generator")
-    g.add_edge("probe_generator",    "runtime_executor")
-    g.add_edge("runtime_executor",   "response_evaluator")
-    g.add_conditional_edges(
-        "response_evaluator",
-        should_retry,
-        {"retry": "retry_evaluator", "end": END},
-    )
-    g.add_edge("retry_evaluator", "probe_generator")
-
-    return g.compile()
-
-
-verification_graph = build_verification_graph()
-```
-
----
-
+The API derives up to four route/method/input candidates from resolved AST scopes. Requests use only the configured target origin, disable redirects and environment proxies, cap response previews at 500 bytes, and have a two-second deadline. Sinks without a safe, specific runtime signal remain unverified. Positive results are persisted per target and cleared after a new SAST baseline or patch application.
 ## Phase 5 — 3-Label Classifier (Objective 03)
 
 **Scoring impact:** Part of the 20-pt criterion. Confirmed must always rank first.
@@ -1393,25 +1222,25 @@ class ClassificationResult:
 
 def classify(
     ast_reachable: bool | None,
-    langgraph_label: str | None,
+    verification_label: str | None,
     is_config_only: bool,
     dual_confirmed: bool = False,
 ) -> ClassificationResult:
     """
     Objective 03 classification rules — strict priority order:
-    1. LangGraph confirmed + dual-confirmed (CWE AND route both match) → Confirmed (0.98)
-    2. LangGraph confirmed exploitation evidence → Confirmed (0.90)
+    1. runtime verification confirmed + dual-confirmed (CWE AND route both match) → Confirmed (0.98)
+    2. runtime verification confirmed exploitation evidence → Confirmed (0.90)
     3. Config issue only → Runtime only
     4. AST unreachable AND not config → Code only (suppress)
     5. AST reachable but probe inconclusive → Code only (pending verification)
     6. Unknown reachability → Code only (conservative)
     """
-    if langgraph_label == "Confirmed" and dual_confirmed:
+    if verification_label == "Confirmed" and dual_confirmed:
         return ClassificationResult(
             label=Label.CONFIRMED, confidence=0.98,
             reason="SAST sink + DAST probe both confirmed; CWE and route both match.",
         )
-    if langgraph_label == "Confirmed":
+    if verification_label == "Confirmed":
         return ClassificationResult(
             label=Label.CONFIRMED, confidence=0.90,
             reason="Runtime probe confirmed exploitation evidence in HTTP response.",
@@ -1725,7 +1554,7 @@ COMPLIANCE_MAP: dict[str, dict] = {
             Point out: "Deterministic AST linkage — exact file and line, not LLM guessing"
 
 [1:30–2:30] Click "Verify" on a Code only finding (SSTI in 404 handler)
-            Show: LangGraph node progression — probe_generator → runtime_executor → ...
+            Show: runtime verification node progression — probe_generator → runtime_executor → ...
             Show: probe_history — first probe {{7*7}} inconclusive, retry fires
             Show: Response "49" captured → label badge flips "Code only" → "Confirmed" live
             Say: "Objective 03 — Confirmed now ranks first, above all Code only findings"
@@ -1773,7 +1602,7 @@ COMPLIANCE_MAP: dict[str, dict] = {
 - Pre-record a 90-second screen capture of the full flow as backup
 - Keep per-target fixtures in `data/sample/` pre-seeded — either profile works offline
 - If Sarvam is unavailable: template patches fire automatically — demo continues
-- Have the LangGraph state JSON ready to show in terminal as last resort
+- Have the runtime verification state JSON ready to show in terminal as last resort
 
 ---
 
@@ -1788,7 +1617,7 @@ COMPLIANCE_MAP: dict[str, dict] = {
 | Runtime finding linked to exact code line | 30 | Obj 02 | [ ] | Show `code_location.file + line` |
 | Confirmed/Code only/Runtime only labels assigned | 20 | Obj 03 | [ ] | Show label badges in UI |
 | Confirmed findings always ranked first | 20 | Obj 03 | [ ] | Show sorted order in UI + API |
-| LangGraph probe fires live and flips label | 25 | Obj 02+03 | [ ] | Show live label animation during demo |
+| runtime verification probe fires live and flips label | 25 | Obj 02+03 | [ ] | Show live label animation during demo |
 | Flask fixture ≥ 70% SAST alerts unreachable/classified Code only | 20 | Obj 03 | [ ] | Show target-scoped `suppression_ratio` |
 | Git diff generated and applied | 20 | Obj 03 | [ ] | Show diff preview in UI |
 | Re-verification probe confirms fix | 20 | Obj 03 | [ ] | Show "Fix Verified" status |

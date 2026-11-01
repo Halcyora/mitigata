@@ -22,6 +22,9 @@ CANARY_PAYLOADS: dict[str, list[str]] = {
         "| echo CANARY_MITIGATA_2026",
     ],
     "ssti": ["{{7*7}}", "${7*7}"],
+    "open_redirect": [
+        "https://example.invalid/https://github.com/juice-shop/juice-shop"
+    ],
     "jwt_weak_secret": ["invalid.canary.token", "invalid.second.canary.token"],
     "eval_injection": ["1+1", "2+2"],
     "insecure_deserialisation": ["\\x80\\x04K\\x01.", "\\x80\\x04K\\x02."],
@@ -38,7 +41,12 @@ EVIDENCE_SIGNALS: dict[str, list[str]] = {
     "insecure_deserialisation": ["pickle", "unpicklingerror"],
     "weak_hash": ["md5", "sha1", "hash"],
 }
-_NON_PROBEABLE_SINKS = {"hardcoded_secret"}
+NON_PROBEABLE_SINKS = {
+    "hardcoded_secret",
+    "insecure_deserialisation",
+    "jwt_weak_secret",
+    "weak_hash",
+}
 
 _PATH_PLACEHOLDER = re.compile(
     r"<(?:(?:int|float|string|path|uuid):)?([A-Za-z_][A-Za-z0-9_]*)>"
@@ -68,7 +76,7 @@ _MAX_RESPONSE_BYTES = 500
 
 
 def probe_generator(state: AlertState) -> AlertState:
-    if state["sink_type"] in _NON_PROBEABLE_SINKS:
+    if state["sink_type"] in NON_PROBEABLE_SINKS:
         return {
             **state,
             "error": "no_safe_runtime_probe_available",
@@ -152,6 +160,7 @@ def _record(
     *,
     response: str | None = None,
     status: int | None = None,
+    location: str | None = None,
     error: str | None = None,
 ) -> list[ProbeRecord]:
     record: ProbeRecord = {
@@ -162,6 +171,8 @@ def _record(
         record["response_preview"] = response[:200]
     if status is not None:
         record["status"] = status
+    if location is not None:
+        record["location"] = location[:500]
     if error is not None:
         record["error"] = error
     return [*state["probe_history"], record]
@@ -247,12 +258,19 @@ async def runtime_executor(state: AlertState) -> AlertState:
                             break
                     response_text = bytes(body).decode("utf-8", errors="replace")
                     status = response.status_code
+                    location = response.headers.get("location")
         return {
             **state,
             "http_status": status,
+            "http_location": location,
             "http_response": response_text,
             "error": None,
-            "probe_history": _record(state, response=response_text, status=status),
+            "probe_history": _record(
+                state,
+                response=response_text,
+                status=status,
+                location=location,
+            ),
         }
     except (TimeoutError, httpx.TimeoutException):
         error = "probe_timeout"
@@ -270,6 +288,25 @@ def response_evaluator(state: AlertState) -> AlertState:
         return state
     response = state.get("http_response") or ""
     sink_type = state["sink_type"]
+    if sink_type == "open_redirect":
+        location = state.get("http_location") or ""
+        try:
+            destination = urlsplit(location)
+        except ValueError:
+            destination = urlsplit("")
+        if (
+            300 <= (state.get("http_status") or 0) < 400
+            and destination.hostname == "example.invalid"
+            and destination.path.startswith(
+                "/https://github.com/juice-shop/juice-shop"
+            )
+        ):
+            return {
+                **state,
+                "evidence": "Response redirected to the external canary destination; redirects were not followed.",
+                "label": "Confirmed",
+            }
+        return {**state, "label": "Code only"}
     lowered = response.casefold()
     signals = EVIDENCE_SIGNALS.get(sink_type, [])
     found = [signal for signal in signals if signal.casefold() in lowered]
@@ -299,6 +336,7 @@ def retry_evaluator(state: AlertState) -> AlertState:
         "probe_variant": state["probe_variant"] + 1,
         "error": None,
         "http_response": None,
+        "http_location": None,
         "http_status": None,
         "evidence": None,
     }

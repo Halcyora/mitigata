@@ -75,7 +75,7 @@ class RouteNode(BaseModel):
         )
 
     def matches_method(self, method: str | None) -> bool:
-        """Require a known method before considering a runtime route match."""
+        """Match a known HTTP method; callers may treat a missing method as unknown."""
         if method is None or not method.strip():
             return False
         normalized_methods = {candidate.upper() for candidate in self.methods}
