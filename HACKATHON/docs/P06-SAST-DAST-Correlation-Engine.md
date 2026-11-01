@@ -1,12 +1,13 @@
 # Problem 06 (Flagship): SAST & DAST Correlation Engine
 ## Scan Code + Runtime · Correlate · Prioritise
 
+> **Status:** Updated to the current repo implementation and operational guidance in `engine/README.md`, not just the original challenge brief.
 > **Mitigata Hackathon — Problem 06 · FLAGSHIP**  
 > Category: Application Security · AI/ML · Compliance Engineering  
 > Bonus Tier: **Flagship Challenge** — bonus points on top of normal score  
 > Real Incident Reference: **INC-06** — 2017 Credit Bureau Breach (~145 million records)  
 > PRD Reference: [P06-PRD.md](P06-PRD.md) — source of truth for all requirements  
-> Architecture update: mandatory route-aware planner + GraphCodeBERT ranking + time-budgeted DAST
+> Architecture update: route-aware planner + advisory GraphCodeBERT ranking + time-budgeted DAST; `GRAPHCODEBERT_MODE=OFF` disables the model step without changing the correlation gate
 
 ---
 
@@ -44,7 +45,7 @@ Neither tool alone is sufficient. Together, without a correlation layer, they pr
 - Scans source code (SAST) **and** the running application (DAST) in one unified pipeline
 - Covers at least **four of six vulnerability types** including SQL injection (CWE-89) and XSS (CWE-79), reported in one common format with CWE numbers
 - Uses a deterministic route-aware planner to schedule the most relevant DAST work before broad scan coverage
-- Applies **mandatory GraphCodeBERT ranking** to ambiguous route/finding candidates without weakening the evidence gate
+- Uses an advisory GraphCodeBERT ranking step to help prioritize ambiguous route/finding candidates without weakening the evidence gate
 - Links each runtime finding to the code behind it and merges duplicates
 - Labels each issue as **Confirmed**, **Code only**, or **Runtime only** — ranking confirmed issues first
 - Generates verified remediation patches mapped to business and compliance risk
@@ -504,7 +505,7 @@ The engine must include a route-aware DAST planner before runtime scanning begin
 - logging reason codes and budget cutoff events,
 - and preserving the strict correlation gate.
 
-**GraphCodeBERT is mandatory in this architecture.** It is used to rank ambiguous route/finding candidates and to enrich planner context, but it is not an authorization layer, a verification oracle, or a replacement for deterministic AST evidence. A model score cannot override the target, route, scope, parameter, or CWE checks required for a `Confirmed` match.
+**GraphCodeBERT is advisory in this architecture.** It is used to rank ambiguous route/finding candidates and to enrich planner context, but it is not an authorization layer, a verification oracle, or a replacement for deterministic AST evidence. A model score cannot override the target, route, scope, parameter, or CWE checks required for a `Confirmed` match. `GRAPHCODEBERT_MODE=OFF` disables the feature cleanly and keeps the deterministic correlation gate intact.
 
 ### 7.4 Performance Requirements
 
@@ -693,7 +694,7 @@ INC-06 Reference:
 
 ## 11. Containerisation Requirements
 
-> **All services must run in Docker containers. One-command startup is mandatory.**
+> **Current repo pattern:** Docker is used for the pinned targets and scanner isolation, while the engine and UI can run either in Docker or via the host-mode launcher. The local Python path is deliberately supported because the engine can run on the host when Docker image rebuilds are not available. One-command startup remains convenient, but it is not the only supported flow.
 
 ### 11.1 Required Container Architecture
 

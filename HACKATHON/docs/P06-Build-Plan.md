@@ -1,10 +1,11 @@
 # P06 Build Plan — Phase-by-Phase Winning Strategy
 
+> **Status:** Updated to the project’s current repo state. This plan reflects the checked-in build and runner flow in `scripts/`, `configs/`, `targets/`, `engine/`, and `frontend/` rather than an earlier design-only draft.
 > **Goal:** Maximum points — 100 base + Flagship Bonus  
 > **PRD:** [P06-PRD.md](P06-PRD.md) — source of truth for all requirements  
 > **Reference:** [P06-SAST-DAST-Correlation-Engine.md](P06-SAST-DAST-Correlation-Engine.md)  
-> **One-command start:** `docker compose up --build` → open `http://localhost:3000`  
-> **Build plan version:** 3.4 — GraphCodeBERT-required planner + time-budgeted DAST
+> **Current execution paths:** `scripts/fetch_targets.ps1` + `scripts/fetch_flask_wheels.ps1` → `docker compose up --build` or the host-mode launcher `scripts/start_local_engine.ps1`  
+> **Build plan version:** 3.5 — repo-backed orchestration, route-aware DAST, bounded verification workflow  
 > **Three mandatory objectives:** Scan Code+App · Correlate+Merge · Prioritise
 
 ---
@@ -122,7 +123,7 @@ The core problem is not only that ZAP is slow in absolute terms; it is that we s
 1. AST extracts every Flask/Express route, method, handler scope, and request parameter read.
 2. Semgrep identifies suspicious source locations and normalizes them to `UnifiedFinding` records.
 3. The planner maps each finding to the most likely route and parameter surface using deterministic route evidence.
-4. GraphCodeBERT is mandatory for ambiguous route/finding ranking and code-context enrichment; it is used to rank candidates, not to confirm or suppress vulnerabilities.
+4. GraphCodeBERT is advisory for ambiguous route/finding ranking and code-context enrichment; it is used to rank candidates, not to confirm or suppress vulnerabilities, and `GRAPHCODEBERT_MODE=OFF` disables the feature without removing the deterministic correlation gate.
 5. The DAST planner selects the highest-priority route + rule pairs and builds a `ScanPlan`.
 6. ZAP executes targeted tests first, while the remaining time is reserved for broader coverage fallback.
 7. Correlation consumes alert evidence incrementally and continues to enforce the strict target + CWE + route + scope + parameter gate.
@@ -1647,4 +1648,4 @@ COMPLIANCE_MAP: dict[str, dict] = {
 ---
 
 *Build plan version: 3.4 — Mitigata Hackathon Problem 06 (Flagship)*
-*Updated: Added the mandatory GraphCodeBERT planner layer, route-aware targeted DAST execution, time-budgeted broad-coverage fallback, and explicit scan plan/task/event contracts while preserving the strict correlation gate and per-target isolation.*
+*Updated: Added the advisory GraphCodeBERT planner layer, route-aware targeted DAST execution, time-budgeted broad-coverage fallback, and explicit scan plan/task/event contracts while preserving the strict correlation gate and per-target isolation.*

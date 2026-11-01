@@ -1,9 +1,12 @@
 # P06 PRD: SAST and DAST Correlation
 ## Product Requirements Document
 
+> **Status:** Updated to match the current repo snapshot and implementation plan in `engine/README.md`.
 > **Author:** Anuj · **Date:** 30 October 2026  
 > **Problem:** 06 · **Flagship Challenge** — bonus points on top of normal score  
 > **One-line mission:** Scan source code + running app, link the two views of every bug into one prioritised list.
+>
+> This PRD remains the product-level source of truth, but the implementation now reflects the checked-in Docker target setup, per-target YAML profiles, local host-mode runner, bounded verification workflow, and code-aware route correlation in the `HACKATHON` codebase. Use the code and scripts as the latest execution reference; treat the PRD as the contract for judged outcomes.
 
 ---
 

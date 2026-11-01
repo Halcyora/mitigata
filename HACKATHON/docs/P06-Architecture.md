@@ -1,11 +1,12 @@
 # P06 Architecture — SAST & DAST Correlation Engine
 ## Complete System Design with Mermaid Diagrams
 
+> **Status:** Updated to the current repo implementation and host/container execution model in `engine/README.md` and the checked-in Docker compose files.
 > **Mitigata Hackathon — Problem 06 · Flagship**  
 > Three Objectives: Scan Code+App · Correlate+Merge · Prioritise  
 > Real Incident: INC-06 — 2017 Credit Bureau Breach (~145M records)  
 > PRD: [P06-PRD.md](P06-PRD.md) — source of truth  
-> Architecture version: 1.4 — route-aware planner, mandatory GraphCodeBERT ranking, and time-budgeted DAST
+> Architecture version: 1.5 — route-aware planner, target-scoped DAST, bounded verification, and advisory GraphCodeBERT ranking
 
 ---
 
@@ -157,7 +158,7 @@ sequenceDiagram
     E->>E: Pass 2: handlers + directly called helper scopes
     E->>E: Pass 3: request parameter reads (path/query/body/header)
     E->>E: build route/finding candidate map + deterministic reason codes
-    E->>E: mandatory GraphCodeBERT routing ranker enriches ambiguous candidates
+    E->>E: advisory GraphCodeBERT routing ranker enriches ambiguous candidates when enabled
     E->>E: DAST planner creates targeted ScanPlan + ScanTask queue
     E->>E: ZAP executes targeted tests first, then broad coverage within budget
     E->>E: map SAST locations into RouteNode code scopes
@@ -967,6 +968,6 @@ graph LR
 
 ---
 
-*Architecture version: 1.4 — Mitigata Hackathon Problem 06 (Flagship); route-aware planner with mandatory GraphCodeBERT ranking and time-budgeted DAST*
+*Architecture version: 1.5 — Mitigata Hackathon Problem 06 (Flagship); route-aware planner with advisory GraphCodeBERT ranking, bounded verification, and time-budgeted DAST*
 *All diagrams use Mermaid — renders natively in GitHub, GitLab, VS Code with Markdown Preview Enhanced, and Obsidian*  
 *Reference: [P06-PRD.md](P06-PRD.md) · [P06-SAST-DAST-Correlation-Engine.md](P06-SAST-DAST-Correlation-Engine.md) · [P06-Build-Plan.md](P06-Build-Plan.md)*
