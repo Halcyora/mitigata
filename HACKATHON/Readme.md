@@ -349,10 +349,10 @@ All verification probes route through the Docker internal network. No probe ever
 
 | Document | Contents |
 |---|---|
-| [`docs/P06-Architecture.md`](docs/P06-Architecture.md) | Full Mermaid architecture diagrams — data flow, component deep-dives, schemas, API contract |
-| [`docs/P06-SAST-DAST-Correlation-Engine.md`](docs/P06-SAST-DAST-Correlation-Engine.md) | Problem statement, three objectives, scoring criteria, definition of done |
-| [`docs/P06-Build-Plan.md`](docs/P06-Build-Plan.md) | Phase-by-phase build plan, FR-to-component mapping, bonus feature tracking |
-| [`docs/P06-PRD.md`](docs/P06-PRD.md) | Product requirements — source of truth |
+| [`docs/P05-Architecture.md`](docs/P06-Architecture.md) | Full Mermaid architecture diagrams — data flow, component deep-dives, schemas, API contract |
+| [`docs/P05-SAST-DAST-Correlation-Engine.md`](docs/P06-SAST-DAST-Correlation-Engine.md) | Problem statement, three objectives, scoring criteria, definition of done |
+| [`docs/P05-Build-Plan.md`](docs/P06-Build-Plan.md) | Phase-by-phase build plan, FR-to-component mapping, bonus feature tracking |
+| [`docs/P05-PRD.md`](docs/P06-PRD.md) | Product requirements — source of truth |
 | [`engine/README.md`](engine/README.md) | Engine package internals — route mapping, verification, classifier, patch, API |
 | [`AGENTS.md`](AGENTS.md) | AI agent context and task history |
 
