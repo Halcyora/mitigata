@@ -171,53 +171,68 @@ Full architecture diagrams: [`docs/P06-Architecture.md`](docs/P06-Architecture.m
 
 ## Architecture Diagram
 
-```mermaid
-flowchart TD
-    subgraph Target ["1. Target Application"]
-        direction TB
-        A[Flask / Juice Shop App]
-    end
-
-    subgraph Analysis ["2. Static Code Analysis & Intelligence"]
-        direction TB
-        B[AST Engine: routes, inputs, & 1-hop scope]
-        C[Semgrep SAST: Deep sink detection & CWE classification]
-    end
-
-    subgraph Mapping ["3. Correlation & Prioritization"]
-        direction TB
-        D[Unified Route & Finding Mapper]
-        E[GraphCodeBERT Scoring Engine: Semantic similarity & risk weights]
-        F[Intelligent Planner: Ranked task list generation]
-    end
-
-    subgraph Testing ["4. DAST Dynamic Testing Passes"]
-        direction TB
-        G[ZAP Focused Pass: Targeted payloads on high-risk routes & params]
-        H[ZAP Broad Pass: Comprehensive crawl & surface discovery]
-    end
-
-    subgraph Correlation ["5. Verification & Reporting"]
-        direction TB
-        I[Correlation Engine: Validates route, scope, param & CWE matches]
-        J[Classification & Report: True positives, priorities & fixes]
-    end
-
-    %% Flow Connections
-    A --> B
-    A --> C
-    B --> D
-    C --> D
-    D --> E
-    E --> F
-    F --> G
-    F --> H
-    G --> I
-    H --> I
-    D --> I
-    I --> J
+```text
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                      1. TARGET APP (Flask / Juice Shop)                      │
+└──────────────────────┬───────────────────────────────┬───────────────────────┘
+                       │                               │
+                       ▼                               ▼
+    ┌──────────────────────────────────┐    ┌──────────────────────────────────┐
+    │     2. AST ENGINE (Code Intel)   │    │     3. SEMGREP SCAN (SAST)       │
+    ├──────────────────────────────────┤    ├──────────────────────────────────┤
+    │ • Pass 1: Route & Prefix (Spec)  │    │ • Deep Code Sink Detection       │
+    │ • Pass 2: 1-Hop Callees (CPG)    │    │ • CWE Classification (e.g., CWE-89)│
+    │ • Pass 3: Param Extractor (Resp) │    │ • Initial Vulnerable Variable IDs│
+    └──────────────────┬───────────────┘    └──────────────────┬───────────────┘
+                       │                                       │
+                       └───────────────┬───────────────────────┘
+                                       │
+                                       ▼
+    ┌──────────────────────────────────────────────────────────────────────────┐
+    │                     4. UNIFIED ROUTE & FINDING MAPPER                    │
+    │  • Normalizes URLs (e.g., /api/orders/{param})                           │
+    │  • Maps SAST findings and parameter scopes to specific code blocks       │
+    └─────────────────────────────────┬────────────────────────────────────────┘
+                                      │
+                                      ▼
+    ┌──────────────────────────────────────────────────────────────────────────┐
+    │                     5. GRAPHCODEBERT SCORING ENGINE                      │
+    │  • Evaluates semantic code similarity and vulnerability likelihood       │
+    │  • Assigns risk weights to prioritized findings                          │
+    └─────────────────────────────────┬────────────────────────────────────────┘
+                                      │
+                                      ▼
+    ┌──────────────────────────────────────────────────────────────────────────┐
+    │                       6. INTELLIGENT PLANNER                             │
+    │  • Generates a dynamic, ranked task list for validation & fuzzing        │
+    └─────────────────────────────────┬────────────────────────────────────────┘
+                                      │
+               ┌──────────────────────┴──────────────────────┐
+               ▼                                             ▼
+    ┌──────────────────────────────────┐    ┌──────────────────────────────────┐
+    │     7a. ZAP FOCUSED PASS         │    │     7b. ZAP BROAD PASS           │
+    ├──────────────────────────────────┤    ├──────────────────────────────────┤
+    │ • Targeted payloads on high-risk │    │ • Comprehensive app crawl        │
+    │   routes, inputs & params        │    │ • Surface discovery & edge cases │
+    └──────────┬───────────────────────┘    └──────────┬───────────────────────┘
+               │                                       │
+               └──────────────────────┬──────────────────────┘
+                                      │
+                                      ▼
+    ┌──────────────────────────────────────────────────────────────────────────┐
+    │                       8. CORRELATION ENGINE                              │
+    │  ✅ Route Match:    ZAP URL path == AST Normalized Route                 │
+    │  ✅ Scope Match:    Vulnerable file/line inside 1-hop scope              │
+    │  ✅ Param Match:    Attacked query/body param == AST extracted param     │
+    │  ✅ CWE Match:      DAST behavior aligns with SAST vulnerability type    │
+    └─────────────────────────────────┬────────────────────────────────────────┘
+                                      │
+                                      ▼
+    ┌──────────────────────────────────────────────────────────────────────────┐
+    │                       9. CLASSIFICATION & REPORT                         │
+    │  🎯 Verified True Positives  │  📊 Risk-Prioritized Findings  │  🛡️ Fixes│
+    └──────────────────────────────────────────────────────────────────────────┘
 ```
-
 
 
 ---
