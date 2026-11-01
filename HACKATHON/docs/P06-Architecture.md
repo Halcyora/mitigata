@@ -22,21 +22,26 @@
 
 ## 1. System Overview
 
-```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                         Mitigata Pipeline                                    │
-│                                                                              │
-│  Semgrep (SAST)  ──►  UnifiedFinding[]  ──►  Three-pass AST Route Mapper    │
-│  OWASP ZAP (DAST)──►  UnifiedFinding[]  ──►  Deduplication                  │
-│                                         ──►  Correlation Gate                │
-│                                               (target + CWE + route +        │
-│                                                scope + parameter)            │
-│                                         ──►  Classifier                      │
-│                                               Confirmed / Code only /        │
-│                                               Runtime only                   │
-│                                         ──►  React UI (Correlation           │
-│                                               Workbench)                     │
-└──────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    SAST["Semgrep SAST\nscan source code"]
+    PARSE_S["semgrep_parser\nUnifiedFinding sast"]
+    AST["Three-pass AST Route Mapper\nPass 1: routes + prefixes\nPass 2: handler + helper scopes\nPass 3: request parameter reads"]
+    PLAN["DAST Planner\nScanPlan: targeted then broad\nadvisory GraphCodeBERT ranking"]
+    ZAP["OWASP ZAP DAST\nscan running app\n5-min budget"]
+    PARSE_Z["zap_parser\nUnifiedFinding dast"]
+    DEDUP["deduplicate_findings\ncollapse repeated reports"]
+    ENRICH["enrich_findings_with_ast\nset reachability flag"]
+    CORR["Correlation Gate\ntarget + CWE + route + scope + parameter\nConfirmed / Corroborated / Code only / Runtime only"]
+    CLF["Classifier + sort_findings\nConfirmed first\nrisk_score secondary sort"]
+    UI["React UI\nCorrelation Workbench\nattack path graph"]
+
+    SAST --> PARSE_S --> DEDUP
+    PARSE_S --> AST
+    AST --> PLAN --> ZAP --> PARSE_Z --> DEDUP
+    DEDUP --> ENRICH
+    AST --> ENRICH
+    ENRICH --> CORR --> CLF --> UI
 ```
 
 **Three mandatory objectives:**
@@ -95,39 +100,53 @@ volumes:
 ```mermaid
 sequenceDiagram
     participant B as Browser
-    participant FE as Frontend :3000
-    participant E as Engine :8000
-    participant DC as Docker (internal)
+    participant FE as Frontend
+    participant E as Engine
+    participant T as Target (internal)
 
-    B->>FE: GET http://localhost:3000
-    FE->>E: GET /api/graph?target_id=flask_demo|juice_shop
+    B->>FE: GET localhost:3000
+    FE->>E: GET /api/graph?target_id=flask_demo
 
-    Note over E: Ingestion (FR-1, FR-2, FR-3)
-    E->>E: semgrep_parser → UnifiedFinding[] (sast, label=Code only)
-    E->>E: zap_parser → UnifiedFinding[] (dast, label=Runtime only)
-    E->>E: deduplicate_findings (SAST by target/CWE/location; DAST by target/CWE/rule/surface)
+    rect rgb(30, 50, 80)
+        Note over E: Step 1 - SAST Ingestion (FR-1, FR-3)
+        E->>E: semgrep_parser → sast UnifiedFinding[]
+        E->>E: deduplicate SAST by target/CWE/file/line
+    end
 
-    Note over E: Three-Pass AST Route Mapper (FR-4)
-    E->>E: select Flask or Express adapter by target profile
-    E->>E: Pass 1: decorators/mounts → normalized RouteNode[]
-    E->>E: Pass 2: handler + one-hop helper scopes → CodeScope[]
-    E->>E: Pass 3: request parameter reads → ParameterRead[]
+    rect rgb(30, 60, 50)
+        Note over E: Step 2 - Three-Pass AST Route Mapper (FR-4)
+        E->>E: Pass 1 - route declarations and prefix mounts
+        E->>E: Pass 2 - handler and one-hop helper scopes
+        E->>E: Pass 3 - request parameter reads
+        E->>E: build_scan_plan - ScanPlan with targeted and broad tasks
+        E->>E: GraphCodeBERT ranking if GRAPHCODEBERT_MODE=ON
+    end
 
-    Note over E: DAST Planning
-    E->>E: build_scan_plan → ScanPlan (targeted + broad ScanTask queue)
-    E->>E: advisory GraphCodeBERT ranking (GRAPHCODEBERT_MODE=ON only)
+    rect rgb(60, 30, 50)
+        Note over E: Step 3 - DAST (FR-2, FR-3) - runs AFTER SAST and route mapping
+        E->>T: ZAP targeted tasks first (15s each)
+        T-->>E: alerts JSON
+        E->>T: ZAP broad fallback tasks (5s each, if budget remains)
+        T-->>E: alerts JSON
+        E->>E: zap_parser → dast UnifiedFinding[]
+        E->>E: deduplicate DAST by target/CWE/rule/path/method/param
+    end
 
-    Note over E: Correlation (FR-5, FR-6)
-    E->>E: enrich_findings_with_ast (reachability)
-    E->>E: correlate_and_merge: target+CWE+route+scope+parameter → Confirmed
-    E->>E: apply persisted verification results
-    E->>E: sort_findings: Confirmed → Corroborated → Code only → Runtime only
+    rect rgb(50, 40, 20)
+        Note over E: Step 4 - Correlation and Classification (FR-5, FR-6, FR-7)
+        E->>E: enrich_findings_with_ast - set reachable flag
+        E->>E: correlate_and_merge - target+CWE+route+scope+parameter
+        E->>E: apply persisted verification results
+        E->>E: sort_findings - Confirmed first then risk_score
+    end
 
-    Note over E: Graph Build
-    E->>E: ELK seed positions → GraphNode[] + GraphEdge[]
-    E->>E: GraphStats: total, confirmed, code_only, runtime_only, suppression_ratio
-    E-->>FE: GraphResponse {nodes, edges, stats}
-    FE-->>B: Correlation Workbench rendered ≤ 3 s
+    rect rgb(20, 40, 60)
+        Note over E: Step 5 - Graph Build
+        E->>E: ELK seed positions - GraphNode[] + GraphEdge[]
+        E->>E: GraphStats - total, confirmed, suppression_ratio
+        E-->>FE: GraphResponse with nodes, edges, stats
+        FE-->>B: Correlation Workbench rendered in under 3s
+    end
 ```
 
 ### 3.2 Live Verification Flow — SSE Stream
