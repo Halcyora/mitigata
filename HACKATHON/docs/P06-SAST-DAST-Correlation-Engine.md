@@ -1,13 +1,14 @@
 # Problem 06 (Flagship): SAST & DAST Correlation Engine
 ## Scan Code + Runtime · Correlate · Prioritise
 
-> **Status:** Updated to the current repo implementation and operational guidance in `engine/README.md`, not just the original challenge brief.
-> **Mitigata Hackathon — Problem 06 · FLAGSHIP**  
-> Category: Application Security · AI/ML · Compliance Engineering  
-> Bonus Tier: **Flagship Challenge** — bonus points on top of normal score  
-> Real Incident Reference: **INC-06** — 2017 Credit Bureau Breach (~145 million records)  
-> PRD Reference: [P06-PRD.md](P06-PRD.md) — source of truth for all requirements  
-> Architecture update: route-aware planner + advisory GraphCodeBERT ranking + time-budgeted DAST; `GRAPHCODEBERT_MODE=OFF` disables the model step without changing the correlation gate
+> **Status:** Current — aligned with the implemented repo state, `engine/README.md`, and `engine/api/`.
+> **Mitigata Hackathon — Problem 06 · FLAGSHIP**
+> Category: Application Security · AI/ML · Compliance Engineering
+> Bonus Tier: **Flagship Challenge** — bonus points on top of normal score
+> Real Incident Reference: **INC-06** — 2017 Credit Bureau Breach (~145 million records)
+> PRD Reference: [P06-PRD.md](P06-PRD.md) — source of truth for all requirements
+> Architecture reference: [P06-Architecture.md](P06-Architecture.md) — full Mermaid diagrams
+> Implementation note: route-aware DAST planner + advisory GraphCodeBERT ranking + bounded verification workflow; `GRAPHCODEBERT_MODE=OFF` (default) disables the model step without changing the correlation gate
 
 ---
 
@@ -61,10 +62,10 @@ This incident exemplifies exactly what Problem 06 solves:
 | What Went Wrong | How This Engine Prevents It |
 |---|---|
 | SAST tools flagged the vulnerability class but it was buried in noise | 3-tier classification surfaces **Confirmed** findings first |
-| DAST scans were not correlated with source code | Three-pass AST route mapping checks normalized route, code scope, and observed input parameter |
-| Duplicate alerts from multiple tools created confusion | Correlation engine merges duplicates — each real vulnerability appears **once** |
-| Security team could not prioritise 1,000+ alerts | Confirmed tier = immediate action; Code-only = review; Runtime-only = investigate |
-| No business context attached to technical findings | INR financial exposure and RBI/SEBI compliance mapping per finding |
+| DAST scans were not correlated with source code | Three-pass AST route mapping checks normalised route, code scope, and observed input parameter |
+| Duplicate alerts from multiple tools created confusion | Deduplication + correlation engine merges duplicates — each real vulnerability appears **once** |
+| Security team could not prioritise 1,000+ alerts | Confirmed tier = immediate action; Code only = review; Runtime only = investigate |
+| No business context attached to technical findings | INR financial exposure and RBI/SEBI/ISO/DPDP compliance mapping per finding |
 
 The engine built for Problem 06 would have surfaced the credit bureau's SQL injection as a single **Confirmed** finding — with the exact file, line number, and live HTTP proof — ranked above hundreds of dead-code false positives.
 
@@ -80,18 +81,18 @@ These three objectives are **what judges score**. All three must be demonstrated
 
 **Required vulnerability coverage (minimum 4 of 6) — from official PRD §5:**
 
-| # | Vulnerability Type | CWE | Can Be Found By | Mandatory |
-|---|---|---|---|---|
-| 1 | **SQL Injection** | CWE-89 | Code and runtime | ✅ Yes |
-| 2 | **Cross-Site Scripting (XSS)** | CWE-79 | Code and runtime | ✅ Yes |
-| 3 | Command Injection | CWE-78 | Code and runtime | Pick ≥2 more |
-| 4 | Path Traversal | CWE-22 | Code and runtime | Pick ≥2 more |
-| 5 | Open Redirect | CWE-601 | Code and runtime | Pick ≥2 more |
-| 6 | Hard-coded Secrets | CWE-798 | Code only | Pick ≥2 more |
+| # | Vulnerability Type | CWE | Can Be Found By | Mandatory | Implemented |
+|---|---|---|---|---|---|
+| 1 | **SQL Injection** | CWE-89 | Code and runtime | ✅ Yes | ✅ |
+| 2 | **Cross-Site Scripting (XSS)** | CWE-79 | Code and runtime | ✅ Yes | ✅ |
+| 3 | Command Injection | CWE-78 | Code and runtime | Pick ≥ 2 more | ✅ |
+| 4 | Path Traversal | CWE-22 | Code and runtime | Pick ≥ 2 more | ✅ |
+| 5 | Open Redirect | CWE-601 | Code and runtime | Pick ≥ 2 more | ✅ |
+| 6 | Hard-coded Secrets | CWE-798 | Code only | Pick ≥ 2 more | ✅ |
 
-> **Important:** The official PRD vulnerability list is CWE-89, CWE-79, CWE-78, CWE-22, CWE-601, CWE-798. Earlier drafts listed CWE-502 (Pickle) and CWE-347 (JWT) — those are still detectable and score bonus points, but are not in the official 6-type list judges use for scoring.
+> **Note:** The official PRD vulnerability list is CWE-89, CWE-79, CWE-78, CWE-22, CWE-601, CWE-798. Additional types detected (CWE-94 SSTI, CWE-347 JWT, CWE-502 Pickle, CWE-916 Weak Hash, CWE-95 Eval) score bonus points but are not in the official 6-type list judges use for scoring.
 
-**Common format requirement:** All findings from both tools and both target profiles are normalised into a single `UnifiedFinding` schema with mandatory `target_id` and `cwe_id` fields.
+**Common format requirement:** All findings from both tools and both target profiles are normalised into a single `UnifiedFinding` schema with mandatory `target_id` and `cwe_id` fields. Finding IDs are stable `uuid5` fingerprints derived from target, source, location, and request surface so they remain consistent across API calls.
 
 ---
 
@@ -101,17 +102,16 @@ These three objectives are **what judges score**. All three must be demonstrated
 
 The correlation engine must:
 
-1. **Link** a DAST runtime finding to a SAST location only when target identity and deterministic AST evidence agree on normalized route, route code scope, and the attacked input parameter
+1. **Link** a DAST runtime finding to a SAST location only when target identity and deterministic AST evidence agree on normalised route, route code scope, and the attacked input parameter
 2. **Merge** duplicate findings (same vulnerability reported by both SAST and DAST) into a single record
 3. **Deduplicate** — each real vulnerability appears **exactly once** in the output
 4. **Require** target and CWE agreement as well as route, scope, and attacked-parameter agreement; HTTP method and parameter source must agree when known
 5. **Prove** the linkage deterministically, not via LLM guessing; a CWE-only or line-range-only match is not sufficient
 
-**Example:** for `target_id=flask_demo`, a Flask Blueprint mounted at `/api` declares
-`@bp.route("/orders/<int:id>")`. The route normalizes to
-`/api/orders/{param}`. If the handler reads query key `q` and directly calls an
-imported helper in `db.py`, the route node contains that parameter read and both
-handler/helper source scopes. A ZAP finding for `/api/orders/42?q=test` can
+**Implemented correlation gate (conjunctive — all must pass):**
+
+```mermaid
+flowchart TD
 correlate with a SAST finding at the helper only if target ID, CWE, route, and
 known method/source also match. The Express adapter resolves a statically mounted
 `router.get("/orders/:id", ...)` under `app.use("/api", router)` to the same URL
