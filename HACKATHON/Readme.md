@@ -7,7 +7,7 @@
 
 ## What This Is
 
-Mitigata is a hybrid **SAST + DAST correlation engine** built for Hackathon Problem 06. It scans an application's source code with Semgrep and its running version with OWASP ZAP, then deterministically links the results so each real vulnerability appears once — with both the exact file/line and proof it can be exploited at runtime.
+Mitigata is a hybrid **SAST + DAST correlation engine** built for Hackathon Problem 5. It scans an application's source code with Semgrep and its running version with OWASP ZAP, then deterministically links the results so each real vulnerability appears once — with both the exact file/line and proof it can be exploited at runtime.
 
 ### Overview
 This project is an AI-driven hybrid security scanner that bridges Static Application Security Testing (SAST) and Dynamic Application Security Testing (DAST).
